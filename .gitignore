@@ -29,6 +29,10 @@ env/
 Thumbs.db
 desktop.ini
 
+# Linux-Filesystem Artefakte (Cowork/WSL)
+.fuse_hidden*
+.claude/
+
 # App-generated
 icon.ico
 icon.png
