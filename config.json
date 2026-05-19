@@ -1,0 +1,7 @@
+{
+    "host": "127.0.0.1",
+    "port": 5001,
+    "max_workers": 12,
+    "browser_fullscreen": true,
+    "log_level": "INFO"
+}

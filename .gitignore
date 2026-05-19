@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# App-generated
+icon.ico
+icon.png
+*.lnk
+debug_html/
+playwright-check/
+.playwright/
+
+# Config (falls Secrets drin landen)
+.env
+
+# Build-Spec
+*.spec

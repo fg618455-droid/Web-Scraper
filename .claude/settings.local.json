@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Test-Path \"C:\\\\Users\\\\User\\\\Desktop\\\\Deal Scraper.lnk\")",
+      "Bash(ls \"C:\\\\Users\\\\User\\\\Desktop\\\\Deal Scraper.lnk\" 2>&1 || echo \"NOT FOUND\")",
+      "Read(//c/Users/User/Desktop/**)",
+      "Bash(python -c ' *)",
+      "Bash(ls \"C:\\\\Users\\\\User\\\\Desktop\\\\\" 2>&1 | head -20)",
+      "Read(//c/Users/User/**)",
+      "Bash(python make_icon.py)",
+      "Bash(python create_shortcut.py)",
+      "Bash(python -c \"import app; print\\('App OK'\\)\")",
+      "PowerShell(Start-Process \"C:\\\\Users\\\\User\\\\Desktop\\\\Deal Scraper.lnk\")",
+      "Skill(obsidian-chat-summary)",
+      "Skill(obsidian-chat-summary:*)"
+    ]
+  }
+}
