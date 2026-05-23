@@ -64,7 +64,7 @@ AUCTION_REFRESH_EVERY_SEC = 30 * 60   # every 30 min
 AUCTION_REFRESH_MAX_ITEMS = 25        # cap per pass — avoid hammering eBay
 
 
-def _build_callback(restrict_model: str | None = None):
+def _build_callback(restrict_model: str | set | None = None):
     """Return a callback that processes deals + marks stale listings unavailable.
     If `restrict_model` is set, unavailability marking is limited to that model only."""
     def callback(deals: list[dict]) -> None:
@@ -86,7 +86,16 @@ def _build_callback(restrict_model: str | None = None):
                             )
 
         for website, urls in by_website.items():
-            db.mark_unavailable(urls, website, model=restrict_model)
+            # For subset scrapes (set of model names) we have to call
+            # mark_unavailable per model so each model only retires URLs
+            # within ITS own scope.
+            if isinstance(restrict_model, (set, frozenset)):
+                for m in restrict_model:
+                    model_urls = {d['url'] for d in deals
+                                  if d['website'] == website and d.get('model') == m}
+                    db.mark_unavailable(model_urls, website, model=m)
+            else:
+                db.mark_unavailable(urls, website, model=restrict_model)
     return callback
 
 
@@ -94,20 +103,42 @@ def _build_callback(restrict_model: str | None = None):
 process_deals = _build_callback()
 
 
-def _do_scrape(target: dict | None = None) -> None:
+def _do_scrape(target: dict | None = None,
+               targets: list | None = None,
+               label: str | None = None) -> None:
+    """Run a scrape.
+
+    Modes:
+      - target=<dict>           → single-target scrape (used by per-deal refresh)
+      - targets=<list of dicts> → arbitrary subset (used by per-group scrape)
+      - target=None, targets=None → all active targets (global scrape)
+
+    Only the global scrape reschedules the next auto-scrape; partial scrapes
+    don't touch the schedule.
+    """
     if target:
         logger.info('Scrape triggered (single target: %s)', target['name'])
-        targets    = [target]
-        restrict   = target['name']
-        reschedule = False
+        scrape_targets = [target]
+        restrict       = target['name']
+        reschedule     = False
+    elif targets:
+        names = ', '.join(t['name'] for t in targets[:5])
+        if len(targets) > 5:
+            names += f' (+{len(targets) - 5} more)'
+        logger.info('Scrape triggered (%s: %s)', label or 'subset', names)
+        scrape_targets = targets
+        # Subset scrapes: only mark stale within these models so other
+        # categories aren't accidentally hidden.
+        restrict       = {t['name'] for t in targets}
+        reschedule     = False
     else:
         logger.info('Scrape triggered (all active targets)')
-        all_targets = db.get_targets()
-        targets     = [t for t in all_targets if t['active']] or None
-        restrict    = None
-        reschedule  = True
+        all_targets    = db.get_targets()
+        scrape_targets = [t for t in all_targets if t['active']] or None
+        restrict       = None
+        reschedule     = True
     try:
-        scraper.run_scrape(callback=_build_callback(restrict), targets=targets)
+        scraper.run_scrape(callback=_build_callback(restrict), targets=scrape_targets)
     except Exception as e:
         logger.exception('Scrape failed: %s', e)
         scraper.STATUS['scraping'] = False
@@ -147,6 +178,22 @@ def _refresh_one_auction(deal: dict) -> bool:
     merged.update(fresh)
     if 'listing_type' not in fresh and deal.get('listing_type'):
         merged['listing_type'] = deal['listing_type']
+
+    # Auction-ended detection: refresh_ebay_item flags ended=True when the
+    # eBay page shows "diese Auktion ist beendet" / "sold for" / itemAvailability
+    # OutOfStock. Retire the deal so the UI stops showing it as live.
+    if fresh.get('ended'):
+        try:
+            conn = db.get_connection()
+            conn.execute('UPDATE deals SET available=0, last_seen=? WHERE id=?',
+                         (datetime.now().isoformat(), deal['id']))
+            conn.commit()
+            conn.close()
+            logger.info(f'auction {deal["id"]} marked ended (eBay page says closed)')
+        except Exception as e:
+            logger.warning('failed to mark ended auction %s: %s', deal.get('id'), e)
+        return True
+
     db.insert_or_update_deal(merged)
 
     # Authoritative bid timeline if reachable — replaces our sampled snapshots
@@ -274,6 +321,32 @@ def api_scrape_target(target_id: int):
     t = threading.Thread(target=_do_scrape, args=(targets[0],), daemon=True)
     t.start()
     return jsonify({'status': 'started', 'target': targets[0]['name']})
+
+
+@app.route('/api/scrape/group/<path:group_name>', methods=['POST'])
+def api_scrape_group(group_name: str):
+    """Scrape every active target in a group with a single click.
+
+    Saves the user from clicking "Aktualisieren" on each product card in a
+    group separately (Felix: "ich muss immer einzelne produkte aktualisieren").
+    """
+    if scraper.STATUS['scraping']:
+        return jsonify({'status': 'already_running'})
+    group_targets = [t for t in db.get_targets()
+                     if t.get('active') and (t.get('group_name') or '') == group_name]
+    if not group_targets:
+        return jsonify({'error': f'Keine aktiven Targets in Gruppe „{group_name}"'}), 404
+    th = threading.Thread(
+        target=_do_scrape,
+        kwargs={'targets': group_targets, 'label': f'group: {group_name}'},
+        daemon=True,
+    )
+    th.start()
+    return jsonify({
+        'status':  'started',
+        'group':   group_name,
+        'targets': [t['name'] for t in group_targets],
+    })
 
 
 @app.route('/api/status')
@@ -608,17 +681,29 @@ def api_set_group_sources(group_name: str):
 @app.route('/api/dashboard')
 def api_dashboard():
     targets = db.get_targets()
+    # Bulk-fetch sources per group ONCE so we don't call get_group_sources()
+    # per target (would be N+1 round-trips). Frontend reads sources off
+    # each target — without this field the group badge always shows
+    # "alle Quellen" no matter what the user saved.
+    group_sources_cache: dict[str, list[str]] = {}
     result = []
     for t in targets:
+        group = t.get('group_name')
+        if group and group not in group_sources_cache:
+            try:
+                group_sources_cache[group] = db.get_group_sources(group)
+            except Exception:
+                group_sources_cache[group] = []
         result.append({
             'id':           t['id'],
             'name':         t['name'],
             'keyword':      t['keyword'],
             'active':       t['active'],
-            'group_name':   t.get('group_name'),
+            'group_name':   group,
             'retail_price': t.get('retail_price'),
             'min_price':    t.get('min_price'),
             'apple_price':  t.get('apple_price'),
+            'sources':      group_sources_cache.get(group, []) if group else [],
             'stats':        db.get_target_summary(t['name']),
             'top_deals':    db.get_top_deals(t['name']) if t['active'] else [],
         })

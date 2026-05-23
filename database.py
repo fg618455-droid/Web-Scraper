@@ -159,6 +159,16 @@ def _cleanup_data(c):
         'notebooktasche', 'notebooksleeve', 'handyhülle', 'smartphonehülle',
         'schutzhülle für', 'hülle für', 'tasche für', 'cover für',
         'adapter für', 'halterung für', 'kabel für', 'ständer für',
+        # iPhone/Mac case patterns flooding "iphone 17 pro" results
+        'magsafe-rückseite', 'magsafe rückseite', 'magsafe-cover', 'magsafe cover',
+        'magsafe-case', 'magsafe case',
+        'iphone-case', 'smartphone-case',
+        'backplate', 'back cover', 'back-cover',
+        'hard case', 'silikon case', 'silikon-case', 'silicon case',
+        'gel case', 'tpu case', 'leder case', 'leather case',
+        'bumper', 'kameralinse', 'kameraschutz', 'linsenschutz',
+        'objektivschutz', 'kameraglas',
+        'displayfolie',
     ]
     for pat in accessory_patterns:
         c.execute('UPDATE deals SET available = 0 WHERE LOWER(title) LIKE ?', (f'%{pat}%',))
@@ -319,21 +329,24 @@ def insert_or_update_deal(deal):
     is_auction = deal.get('listing_type') == 'auction'
 
     if existing:
-        # For auctions: snapshot the price on every scrape so we get a real time
-        # series, even when the bid hasn't changed between scrapes.
-        # For fixed-price: only log when the price actually changes.
+        # Snapshot ONLY on real change. Two triggers:
+        #   - price changed
+        #   - bid_count went up (auction got a new bidder at same proxy max)
+        # Unchanged state produces no snapshot. The chart should show bid
+        # events, not sampling clicks — a row of 5 identical 450 € points
+        # stamped with the user's "Aktualisieren" times is noise that masks
+        # the real price trajectory.
         if deal.get('price') is not None:
-            if is_auction:
+            price_changed = (existing['price'] is None
+                             or existing['price'] != deal['price'])
+            bids_changed  = (is_auction
+                             and deal.get('bid_count') is not None
+                             and (existing['bid_count'] or 0) < deal.get('bid_count'))
+            if price_changed or bids_changed:
                 c.execute(
                     '''INSERT INTO price_history
                        (deal_id, price, changed_at, source) VALUES (?, ?, ?, ?)''',
                     (existing['id'], deal['price'], now, 'snapshot')
-                )
-            elif existing['price'] is not None and existing['price'] != deal['price']:
-                c.execute(
-                    '''INSERT INTO price_history
-                       (deal_id, price, changed_at, source) VALUES (?, ?, ?, ?)''',
-                    (existing['id'], existing['price'], now, 'snapshot')
                 )
         c.execute(
             '''UPDATE deals

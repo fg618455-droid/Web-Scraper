@@ -178,6 +178,10 @@ function buildGroupedSections(targets) {
     <span class="group-meta">${g.targets.length} ${g.targets.length === 1 ? 'Produkt' : 'Produkte'} · ${totalDeals} Deals</span>
     <span class="group-head-spacer"></span>
     ${sourceBadge}
+    <button class="btn-icon group-scrape-btn" title="Alle Produkte dieser Gruppe scrapen"
+            onclick="event.stopPropagation(); scrapeGroup(${esc(JSON.stringify(g.name))}, this)">
+      ${icon('refresh')}
+    </button>
     <button class="btn-icon group-sources-btn" title="Quellen für diese Gruppe bearbeiten"
             onclick="event.stopPropagation(); openGroupSourcePicker(${esc(JSON.stringify(g.name))}, this)">
       ${icon('settings')}
@@ -876,6 +880,31 @@ async function scrapeTarget(id, btn) {
   }
 }
 
+async function scrapeGroup(groupName, btn) {
+  if (btn?.disabled) return;
+  if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
+  try {
+    const res = await api(
+      `/api/scrape/group/${encodeURIComponent(groupName)}`,
+      { method: 'POST' },
+    );
+    if (res.status === 'already_running') {
+      toast('Scraping läuft bereits…', 'warning');
+    } else {
+      const n = (res.targets || []).length;
+      toast(`Gruppe „${groupName}" wird gescrapt (${n} Produkt${n === 1 ? '' : 'e'})…`, 'info');
+      pollUntilDone();
+    }
+  } catch (err) {
+    toast('Fehler: ' + (err?.message ?? 'unbekannt'), 'error');
+  } finally {
+    if (btn) {
+      setTimeout(() => { btn.disabled = false; btn.classList.remove('spinning'); }, 1500);
+    }
+  }
+}
+
+
 async function triggerScrape() {
   const btn     = document.getElementById('scrape-btn');
   const overlay = document.getElementById('scrape-overlay');
@@ -1169,7 +1198,7 @@ async function openGroupSourcePicker(groupName, btn) {
   const allUnchecked = currentSet.size === 0;  // empty = all allowed
 
   let html = `
-  <div class="source-picker-popup" id="sp-${esc(groupName)}">
+  <div class="source-picker-popup" id="sp-${esc(groupName)}" data-group-name="${esc(groupName)}">
     <div class="sp-head">
       <span class="sp-title">${icon('link')} Quellen für „${esc(groupName)}"</span>
       <button class="sp-close" onclick="this.closest('.source-picker-popup').remove()">✕</button>
@@ -1204,13 +1233,45 @@ async function openGroupSourcePicker(groupName, btn) {
   wrapper.innerHTML = html;
   const popup = wrapper.firstElementChild;
 
-  // Position below the button
-  const rect = btn.getBoundingClientRect();
+  // Append first so we can measure actual height — needed for flip logic below.
   popup.style.position = 'fixed';
-  popup.style.top  = (rect.bottom + 6) + 'px';
-  popup.style.left = Math.max(8, rect.left - 280) + 'px';
+  popup.style.visibility = 'hidden';
   popup.style.zIndex = '9999';
   document.body.appendChild(popup);
+
+  // Smart placement: prefer below the button, but flip above when the bottom
+  // half doesn't fit. Cap height to available space so the action buttons
+  // ("Speichern" / "Alle Quellen") never get clipped at the bottom of the
+  // viewport — that was the "unten rechts sieht man nd alle optionen" bug.
+  const rect = btn.getBoundingClientRect();
+  const vh = window.innerHeight;
+  const vw = window.innerWidth;
+  const margin = 12;            // breathing room top + bottom
+  const popupW = popup.offsetWidth;
+  const popupH = popup.offsetHeight;
+  const spaceBelow = vh - rect.bottom - margin;
+  const spaceAbove = rect.top - margin;
+
+  let top, maxH;
+  if (popupH <= spaceBelow || spaceBelow >= spaceAbove) {
+    // Place below
+    top = rect.bottom + 6;
+    maxH = spaceBelow;
+  } else {
+    // Place above — bottom-anchor the popup
+    maxH = spaceAbove;
+    top  = Math.max(margin, rect.top - 6 - Math.min(popupH, maxH));
+  }
+
+  // Horizontal: keep aligned to the right edge of the button, but never let
+  // the popup overflow the viewport on the right.
+  let left = Math.max(8, rect.right - popupW);
+  if (left + popupW > vw - 8) left = vw - popupW - 8;
+
+  popup.style.top    = top + 'px';
+  popup.style.left   = left + 'px';
+  popup.style.maxHeight  = Math.max(160, maxH) + 'px';
+  popup.style.visibility = 'visible';
 
   // Click-outside closes
   setTimeout(() => {
@@ -1224,7 +1285,9 @@ async function openGroupSourcePicker(groupName, btn) {
 }
 
 async function saveGroupSources(groupName) {
-  const popup = document.getElementById(`sp-${groupName}`);
+  // Use querySelector with attribute selector to avoid ID-escaping issues
+  const popup = document.querySelector(`.source-picker-popup[data-group-name="${esc(groupName)}"]`)
+             || document.getElementById(`sp-${groupName}`);
   if (!popup) return;
   const sources = [...popup.querySelectorAll('.sp-cb:checked')].map(cb => cb.value);
   try {

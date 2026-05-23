@@ -146,6 +146,12 @@ _ACCESSORY_WORDS = re.compile(
     r'|kabel(?:set)?|magsafe[-\s]?kabel'
     r'|skin|aufkleber|sticker|folie'
     r'|abdeckung|displayschutzglas'
+    # Cases / backs / covers (catches "MagSafe-Rückseite", "Bumper",
+    # "Hard Case", "Silikon Case", "Back Cover") — these are the
+    # ones flooding the iPhone results.
+    r'|r[uü]ckseite|backplate|back[\s-]?cover|bumper'
+    r'|(?:hard|silikon|silicon|gel|tpu|leder|leather)[\s-]?case'
+    r'|kameralinse|kameraschutz|linsenschutz|objektivschutz|kameraglas'
     r')\b',
     re.IGNORECASE,
 )
@@ -155,12 +161,24 @@ _FOR_PRODUCT = re.compile(
     re.IGNORECASE,
 )
 
-# Words that are almost always accessories on their own
+# Words that are almost always accessories on their own — matched regardless
+# of position in the title (no "before keyword" heuristic needed).
 _DEFINITELY_ACCESSORY = re.compile(
     r'\b(dockingstation|docking[\s-]?station|schutzfolie|schutzglas|displayschutz'
     r'|panzerglas|ladekabel|netzteil|magsafe[-\s]?kabel|powerbank|usb[-\s]?c[-\s]?hub'
     r'|tastatur[\s-]?h[uü]lle|laptop[\s-]?h[uü]lle|laptop[\s-]?tasche|laptop[\s-]?sleeve'
-    r'|notebook[\s-]?tasche|notebook[\s-]?sleeve|handy[\s-]?h[uü]lle|smartphone[\s-]?h[uü]lle)\b',
+    r'|notebook[\s-]?tasche|notebook[\s-]?sleeve|handy[\s-]?h[uü]lle|smartphone[\s-]?h[uü]lle'
+    # Case / back / cover patterns flooding the iPhone results (2026-05).
+    # These are unambiguous accessories regardless of where they sit in the
+    # title — "iPhone 17 Pro Hard Case" still needs to be filtered out
+    # even though the keyword comes first.
+    r'|magsafe[\s-]?r[uü]ckseite|magsafe[\s-]?cover|magsafe[\s-]?case'
+    r'|iphone[\s-]?case|smartphone[\s-]?case'
+    r'|(?:hard|silikon|silicon|gel|tpu|leder|leather)[\s-]?case'
+    r'|backplate|back[\s-]?cover|r[uü]ckseite|bumper'
+    r'|displayfolie|kameraschutz|kameralinsen[\s-]?schutz'
+    r'|objektivschutz|kameraglas|linsenschutz|kameralinse'
+    r')\b',
     re.IGNORECASE,
 )
 
@@ -768,22 +786,56 @@ def parse_ebay_bid_history(raw: str) -> list[dict]:
     return _sort_and_dedupe_bids(bids)
 
 
+# Module-level cache: when eBay's anti-bot wall has been seen recently we
+# stop hammering /bfl/viewbids/. Resets after _EBAY_BLOCK_COOLDOWN_SEC so
+# we'll automatically recover once the IP gets unbanned.
+_EBAY_BLOCKED_UNTIL: float = 0.0
+_EBAY_BLOCK_COOLDOWN_SEC = 30 * 60   # 30 min — matches the auction-refresh tick
+
+
+def _ebay_response_is_blocked(html: str) -> bool:
+    """Cheap classifier for eBay/Akamai block pages. Reuses the same marker
+    list the PW batch uses so the criteria stay consistent."""
+    if not html:
+        return False
+    lo = html.lower()
+    return any(m in lo for m in _BOT_CHALLENGE_MARKERS) or 'splashui' in lo
+
+
 def scrape_ebay_bid_history(item_url: str) -> list[dict]:
     """Fetch eBay's public bid-history page for an auction and return all bids.
 
     Strategy:
       1. Try plain requests (fast) — works if the page is server-rendered.
-      2. If 0 bids found, retry with Playwright (handles JS-rendered pages).
+      2. If 0 bids found AND not a known block page, retry with Playwright.
       3. Save debug HTML on failure so we can inspect what eBay returned.
+
+    Has a module-level cooldown: once we see an Akamai/Splash block, we stop
+    hitting the endpoint for `_EBAY_BLOCK_COOLDOWN_SEC` seconds. Otherwise
+    the auction-refresh thread fires 22 hopeless requests every 30 min.
 
     Endpoint: https://www.ebay.de/bfl/viewbids/<ITEM_ID>?item=<ITEM_ID>&rt=nc
     Returns sorted-ascending list:
       [{'price': 2.85, 'changed_at': '2026-05-15T18:56:45', 'bidder': '9***d'}, ...]
     Empty list on any failure — caller falls back to its own snapshot history.
     """
+    global _EBAY_BLOCKED_UNTIL
+
     item_id = _ebay_item_id(item_url)
     if not item_id:
         return []
+
+    # ── Cooldown gate ─────────────────────────────────────────────────────
+    # When eBay's IP-ban is active, all requests are wasted Akamai roundtrips
+    # — skip until the cooldown expires.
+    now = time.time()
+    if now < _EBAY_BLOCKED_UNTIL:
+        logger.debug(
+            'bid-history skipped for %s — eBay block cooldown active for %.0f more seconds',
+            item_id, _EBAY_BLOCKED_UNTIL - now,
+        )
+        return []
+
     from urllib.parse import urlparse
     p = urlparse(item_url)
     host  = p.netloc or 'www.ebay.de'
@@ -802,6 +854,17 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
             html = r.text
     except Exception as e:
         logger.debug('bid-history requests fetch failed for %s: %s', item_id, e)
+
+    # Detect block FAST so we don't even attempt Playwright when eBay is in
+    # full-deny mode (saves ~25 s of wasted browser startup per call).
+    if _ebay_response_is_blocked(html):
+        _EBAY_BLOCKED_UNTIL = now + _EBAY_BLOCK_COOLDOWN_SEC
+        _save_debug_html('bid_history', item_id, html)
+        logger.warning(
+            'bid-history: eBay block page detected — cooldown enabled for %d min',
+            _EBAY_BLOCK_COOLDOWN_SEC // 60,
+        )
+        return []
 
     bids = parse_ebay_bid_history(html) if html else []
     if bids:
@@ -842,6 +905,17 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
             browser.close()
     except Exception as e:
         logger.warning('bid-history PW fetch failed for %s: %s', item_id, e)
+
+    # Same block-detect on the PW response so the cooldown also engages
+    # when eBay shows the splash-UI page (which Playwright happily renders).
+    if _ebay_response_is_blocked(html):
+        _EBAY_BLOCKED_UNTIL = time.time() + _EBAY_BLOCK_COOLDOWN_SEC
+        _save_debug_html('bid_history', item_id, html)
+        logger.warning(
+            'bid-history (PW): eBay block page detected — cooldown enabled for %d min',
+            _EBAY_BLOCK_COOLDOWN_SEC // 60,
+        )
+        return []
 
     bids = parse_ebay_bid_history(html) if html else []
     if not bids and html:
@@ -914,6 +988,30 @@ def refresh_ebay_item(url: str) -> dict | None:
         # can't tell, leave it alone — the caller preserves the original value
         # (so 'auction' isn't accidentally clobbered with 'fixed').
         out['listing_type'] = 'auction'
+
+    # ── Auction ended detection ───────────────────────────────────────────
+    # eBay shows specific copy when a listing is closed. If any of these
+    # phrases appears, we mark the deal as ended so the UI can hide it.
+    # We OR-check against the lowercased body (cheap) AND a few specific
+    # status containers.
+    body_lo = r.text.lower()
+    ended_markers = (
+        'this listing has ended',
+        'diese auktion ist beendet',
+        'this listing was ended',
+        'auktion beendet',
+        'item ended',
+        'angebot beendet',
+        'das angebot wurde beendet',
+        'bidding has ended',
+        'gebotsabgabe beendet',
+        'sold for',                # ended + sold copy
+        '"itemavailability":"outofstock"',
+        '"itemavailability":"discontinued"',
+        '"itemavailability":"soldout"',
+    )
+    if any(m_ in body_lo for m_ in ended_markers):
+        out['ended'] = True
 
     return out
 
@@ -1177,12 +1275,119 @@ def _parse_mac_store24_page(html: str, default_model: str, keyword: str | None =
     return deals
 
 
-def scrape_mac_store24(targets: list[dict]) -> list[dict]:
-    return _generic_scrape(
-        'mac-store24', targets,
-        lambda kw: f'https://www.mac-store24.com/search?search={kw.replace(" ", "+")}',
-        _parse_mac_store24_page,
+def _scrape_mac_store24_json(keyword: str, default_model: str):
+    '''Shopify JSON search API -- returns list of deals or None on failure.'''
+    url = (
+        'https://www.mac-store24.com/search.json'
+        '?q={}&type=product&limit=50'.format(keyword.replace(' ', '+'))
     )
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            logger.debug('mac-store24 JSON API HTTP %s', resp.status_code)
+            return None
+        data = resp.json()
+    except Exception as exc:
+        logger.debug('mac-store24 JSON API error: %s', exc)
+        return None
+
+    products = data.get('results', []) or data.get('products', [])
+    if not products:
+        logger.debug('mac-store24 JSON API: 0 products')
+        return None
+
+    deals = []
+    for prod in products:
+        try:
+            title = prod.get('title', '')
+            if not title or _is_unwanted(title, None, keyword):
+                continue
+            price_raw = None
+            variants = prod.get('variants', [])
+            if variants:
+                price_raw = variants[0].get('price')
+            if price_raw is None:
+                price_raw = prod.get('price_min') or prod.get('price')
+            if price_raw is None:
+                continue
+            try:
+                price = float(str(price_raw).replace(',', '.'))
+                if price > 10000:
+                    price = price / 100.0
+            except (ValueError, TypeError):
+                continue
+            if price < 100:
+                continue
+            handle = prod.get('handle', '')
+            if not handle:
+                continue
+            url_prod = 'https://www.mac-store24.com/products/' + handle
+            image_url = None
+            images = prod.get('images', [])
+            if images:
+                img = images[0]
+                image_url = img if isinstance(img, str) else img.get('src')
+            deals.append({
+                'title':        title[:255],
+                'price':        price,
+                'url':          url_prod,
+                'website':      'mac-store24',
+                'model':        _detect_model(title) or default_model,
+                'ram':          _extract_ram(title),
+                'ssd':          _extract_ssd(title),
+                'image_url':    image_url,
+                'description':  (prod.get('body_html') or '')[:500] or None,
+                'pickup_only':  False,
+                'listing_type': 'fixed',
+            })
+        except Exception as exc:
+            logger.debug('mac-store24 JSON item error: %s', exc)
+    return deals
+
+
+def scrape_mac_store24(targets: list[dict]) -> list[dict]:
+    '''
+    mac-store24 ist ein Shopify-Shop - Suchergebnisse sind JS-gerendert.
+    Primaer: Shopify JSON Search API (kein Browser noetig).
+    Fallback: HTML-Parser (liefert meist 0 Treffer auf JS-Seiten).
+    '''
+    all_deals = []
+    any_ok = False
+    detail_parts = []
+
+    for target in targets:
+        keyword       = target.get('keyword', '')
+        default_model = target.get('name', 'Mac')
+
+        deals = _scrape_mac_store24_json(keyword, default_model)
+        if deals is not None:
+            any_ok = True
+            all_deals.extend(deals)
+            detail_parts.append('JSON API: {} Treffer'.format(len(deals)))
+            continue
+
+        # Fallback HTML (bleibt als Sicherheitsnetz)
+        html_url = ('https://www.mac-store24.com/search?search='
+                    + keyword.replace(' ', '+'))
+        try:
+            resp = requests.get(html_url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            html_deals = _parse_mac_store24_page(resp.text, default_model, keyword)
+            any_ok = True
+            all_deals.extend(html_deals)
+            detail_parts.append('HTML: {} Treffer'.format(len(html_deals)))
+        except Exception as exc:
+            detail_parts.append('Fehler: {}'.format(exc))
+
+    detail = '; '.join(detail_parts) if detail_parts else 'Keine Targets'
+    _set_site_status(
+        'mac-store24',
+        status='ok' if all_deals else ('ok' if any_ok else 'error'),
+        detail=detail,
+        count=len(all_deals),
+        ok=any_ok,
+    )
+    return all_deals
 
 
 # ── asgoodasnew (keyword-based search) ───────────────────────────────────────
@@ -2187,6 +2392,21 @@ _BOT_CHALLENGE_MARKERS = (
     'api-services-support@amazon',         # Amazon "Sorry!"
     'zur sicherheit unserer kunden',       # Amazon DE
     'press & hold to confirm you are',     # Amazon press-and-hold CAPTCHA
+    # ── Akamai / IP-Ban patterns (observed in production, 2026-05) ────────
+    # eBay's full deny page: "<title>Access Denied" + reference URL on Akamai
+    'errors.edgesuite.net',                # Akamai error tracking URL
+    'access denied</h1>',                  # generic Akamai deny body (with close tag to avoid false positives)
+    "don't have permission to access",     # Akamai Access Denied body line
+    # notebooksbilliger's explicit IP-block page
+    'client has been blocked by bot protection',
+    '<title>bot detected',
+    # Idealo's "Sorry"-page (lighter Akamai variant — generic message page)
+    'sorry! something has gone wrong',
+    # PerimeterX / HUMAN bot protection
+    '_px_ce_',
+    'px-captcha',
+    # Generic "rate limit" / "too many requests" — last resort
+    'rate limit exceeded',
 )
 
 
@@ -2371,11 +2591,25 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
                 challenges = 0
                 errors: list[str] = []
 
+                def _recreate_page():
+                    """Re-create the page after a crash. Some sites (Otto, Quoka)
+                    kill the renderer mid-navigation via aggressive anti-bot JS —
+                    after which any subsequent call on the dead page raises
+                    'Target page... has been closed'. We swap in a fresh page so
+                    the rest of the target list can still be attempted."""
+                    nonlocal page
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+                    page = ctx.new_page()
+
                 for i, target in enumerate(eligible_targets):
-                    # Random delay between requests to the same site (2-5s)
+                    # Random delay between requests to the same site (2-5s).
+                    # Use time.sleep -- page.wait_for_timeout would itself crash
+                    # if the previous target killed the page object.
                     if i > 0:
-                        delay = random.uniform(2.0, 5.0)
-                        page.wait_for_timeout(int(delay * 1000))
+                        time.sleep(random.uniform(2.0, 5.0))
 
                     url = url_builder(target['keyword'])
                     try:
@@ -2450,9 +2684,22 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
                     except PWTimeout:
                         errors.append('timeout')
                         logger.warning(f'{name} ({target["keyword"]}): timeout')
+                        # A timeout shouldn't kill the page, but recreate to be safe
+                        # — Playwright sometimes leaves it in a wedged state where
+                        # the *next* navigation also times out.
+                        _recreate_page()
                     except Exception as e:
-                        errors.append(str(e)[:60])
-                        logger.warning(f'{name} ({target["keyword"]}): {e}')
+                        msg = str(e)
+                        errors.append(msg[:60])
+                        logger.warning(f'{name} ({target["keyword"]}): {msg}')
+                        # If the renderer crashed or the page got closed, every
+                        # subsequent target on this site would fail the same way
+                        # — recreate so the loop can continue cleanly.
+                        if ('crashed' in msg.lower()
+                                or 'has been closed' in msg.lower()
+                                or 'target page' in msg.lower()):
+                            logger.info(f'{name}: recreating page after crash')
+                            _recreate_page()
 
                 try:
                     ctx.close()

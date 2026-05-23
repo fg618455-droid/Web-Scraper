@@ -1652,6 +1652,15 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
 .group-head:hover .group-sources-btn,
 .group-sources-btn:hover { opacity: 1; color: var(--accent); }
 
+.group-scrape-btn {
+  opacity: 0.45;
+  transition: opacity .15s, color .15s;
+  margin-right: 0.15rem;
+}
+.group-head:hover .group-scrape-btn,
+.group-scrape-btn:hover { opacity: 1; color: var(--accent); }
+.group-scrape-btn.spinning svg { animation: spin 0.9s linear infinite; }
+
 /* ── Source Picker Popup ─────────────────────────────────── */
 .source-picker-popup {
   background: var(--glass-bg, rgba(18,22,48,.95));
