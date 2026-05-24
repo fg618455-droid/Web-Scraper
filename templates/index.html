@@ -282,6 +282,21 @@
     </section>
 
     <section class="drawer-section">
+      <h3><svg class="h3-icon"><use href="#i-tag-eur"/></svg> eBay-Login</h3>
+      <p class="dim text-xs" style="margin: 0 0 8px;">Aktiviert das automatische Importieren der Gebotsübersicht — sonst musst du Gebote manuell einfügen.</p>
+      <div id="ebay-session-status" class="dim text-xs" style="margin-bottom: 8px;">Lade Status…</div>
+      <div class="alert-form-row" style="gap: 8px;">
+        <button id="ebay-login-btn" class="btn btn-primary" style="flex: 1;">
+          <svg class="btn-icon-svg"><use href="#i-refresh"/></svg>
+          <span>Bei eBay einloggen</span>
+        </button>
+        <button id="ebay-logout-btn" class="btn btn-ghost hidden" title="Gespeicherten Login löschen">
+          <svg class="btn-icon-svg"><use href="#i-x"/></svg>
+        </button>
+      </div>
+    </section>
+
+    <section class="drawer-section">
       <h3><svg class="h3-icon"><use href="#i-tag"/></svg> Umkreis-Filter</h3>
       <p class="dim text-xs" style="margin: 0 0 8px;">Versteckt Kleinanzeigen-Deals außerhalb deines Radius. Online-Shops bleiben sichtbar.</p>
       <div class="alert-form">
@@ -290,7 +305,7 @@
           <span id="plz-status" class="dim text-xs" style="min-width: 80px;">aus</span>
         </div>
         <div class="alert-form-row" style="align-items: center; gap: 10px;">
-          <input id="radius-slider" type="range" min="0" max="500" step="10" value="0" style="flex: 1;" />
+          <input id="radius-slider" type="range" min="0" max="500" step="10" value="0" title="Umkreis-Radius in Kilometern" aria-label="Radius in km" style="flex: 1;" />
           <span id="radius-label" class="dim text-xs" style="min-width: 55px; text-align: right; font-variant-numeric: tabular-nums;">aus</span>
         </div>
       </div>

@@ -893,11 +893,23 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=['--no-sandbox'])
-            ctx = browser.new_context(
+            ctx_kwargs = dict(
                 user_agent=_BIG_SHOP_HEADERS.get('User-Agent', ''),
                 locale='de-DE',
                 timezone_id='Europe/Berlin',
             )
+            # If the user logged in via the "eBay-Login"-button (Iter. 25),
+            # inject the saved cookies so /bfl/viewbids/ returns the bid
+            # table instead of redirecting to /signin.
+            try:
+                from ebay_session import session_path_for_playwright
+                sess_path = session_path_for_playwright()
+                if sess_path:
+                    ctx_kwargs['storage_state'] = sess_path
+                    logger.debug('bid-history: using saved eBay login session')
+            except Exception:
+                pass
+            ctx = browser.new_context(**ctx_kwargs)
             page = ctx.new_page()
             page.goto(url, wait_until='domcontentloaded', timeout=20_000)
             # Wait for table content to render

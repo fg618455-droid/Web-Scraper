@@ -64,6 +64,83 @@ async function saveFilterSettings() {
   }
 }
 
+/* ── eBay-Login-Session (Iter. 25) ─────────────────────────────────
+   Opens a real browser window on the user's PC for the eBay login,
+   saves the session cookies for the background bid-history scraper. */
+let _ebayLoginPollTimer = null;
+
+async function loadEbaySessionStatus() {
+  try {
+    const s = await api('/api/ebay-session/status');
+    renderEbaySessionStatus(s);
+    return s;
+  } catch {
+    return null;
+  }
+}
+
+function renderEbaySessionStatus(s) {
+  const statusEl = document.getElementById('ebay-session-status');
+  const loginBtn = document.getElementById('ebay-login-btn');
+  const logoutBtn = document.getElementById('ebay-logout-btn');
+  if (!statusEl || !loginBtn) return;
+
+  if (s.in_progress) {
+    statusEl.textContent = '⏳ Browser-Fenster geöffnet — bitte einloggen…';
+    statusEl.style.color = 'var(--amber, #fbbf24)';
+    loginBtn.disabled = true;
+    loginBtn.querySelector('span').textContent = 'Login läuft…';
+    logoutBtn?.classList.add('hidden');
+  } else if (s.has_session) {
+    statusEl.textContent = '✅ Eingeloggt — Gebot-Auto-Import aktiv';
+    statusEl.style.color = 'var(--green, #4ade80)';
+    loginBtn.disabled = false;
+    loginBtn.querySelector('span').textContent = 'Neu einloggen';
+    logoutBtn?.classList.remove('hidden');
+  } else {
+    statusEl.textContent = 'Nicht eingeloggt — Gebote müssen manuell eingefügt werden';
+    statusEl.style.color = '';
+    loginBtn.disabled = false;
+    loginBtn.querySelector('span').textContent = 'Bei eBay einloggen';
+    logoutBtn?.classList.add('hidden');
+  }
+}
+
+async function startEbayLogin() {
+  try {
+    const res = await api('/api/ebay-session/login', { method: 'POST' });
+    if (res.status === 'started') {
+      toast('Browser-Fenster öffnet sich — logge dich bei eBay ein', 'info', 6000);
+    } else if (res.status === 'already_running') {
+      toast('Login läuft schon — prüfe das Browser-Fenster', 'warning');
+    }
+    // Poll status every 2s until in_progress flips false.
+    if (_ebayLoginPollTimer) clearInterval(_ebayLoginPollTimer);
+    _ebayLoginPollTimer = setInterval(async () => {
+      const s = await loadEbaySessionStatus();
+      if (s && !s.in_progress) {
+        clearInterval(_ebayLoginPollTimer);
+        _ebayLoginPollTimer = null;
+        if (s.last_result === 'ok')        toast(s.last_message || 'Login gespeichert', 'success');
+        else if (s.last_result === 'error') toast(s.last_message || 'Login fehlgeschlagen', 'error');
+      }
+    }, 2000);
+  } catch {
+    toast('Login konnte nicht gestartet werden', 'error');
+  }
+}
+
+async function logoutEbay() {
+  if (!confirm('Gespeicherten eBay-Login löschen?\n(Gebot-Auto-Import wird wieder deaktiviert.)')) return;
+  try {
+    await api('/api/ebay-session/logout', { method: 'POST' });
+    toast('Login gelöscht', 'info');
+    loadEbaySessionStatus();
+  } catch {
+    toast('Fehler beim Löschen', 'error');
+  }
+}
+
 /* ── Icon helper ─────────────────────────────────────────────────── */
 function icon(name, cls = '') {
   return `<svg class="${cls}"><use href="#i-${name}"/></svg>`;
@@ -2003,6 +2080,11 @@ document.addEventListener('DOMContentLoaded', () => {
     _filterRadius = Number(e.target.value) || 0;
     scheduleFilterSave();
   });
+
+  // eBay-Login-Session (Iter. 25)
+  loadEbaySessionStatus();
+  document.getElementById('ebay-login-btn')?.addEventListener('click', startEbayLogin);
+  document.getElementById('ebay-logout-btn')?.addEventListener('click', logoutEbay);
 
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {

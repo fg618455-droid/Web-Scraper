@@ -18,6 +18,7 @@ from flask import Flask, Response, jsonify, render_template, request, send_from_
 
 import database as db
 import scraper
+import ebay_session
 from geocoder import geocode
 from notifier import send_notification
 
@@ -648,6 +649,29 @@ def api_purchase_group(group_name: str):
 def api_purchased():
     """List recently purchased deals (for the 'Was hab ich gekauft?' panel)."""
     return jsonify(db.get_purchased_deals())
+
+
+# ── eBay-Session: Login-Cookie persistence (Iter. 25) ───────────────────────
+
+@app.route('/api/ebay-session/status')
+def api_ebay_session_status():
+    return jsonify(ebay_session.get_login_status())
+
+
+@app.route('/api/ebay-session/login', methods=['POST'])
+def api_ebay_session_login():
+    """Open an interactive browser window so the user can log in to eBay.
+    Returns immediately — flow runs in a background thread; UI polls
+    /api/ebay-session/status until in_progress flips back to False."""
+    return jsonify(ebay_session.start_login_flow_async())
+
+
+@app.route('/api/ebay-session/logout', methods=['POST'])
+def api_ebay_session_logout():
+    """Delete the saved session — next bid-history call falls back to the
+    unauthenticated path again."""
+    deleted = ebay_session.delete_session()
+    return jsonify({'ok': True, 'deleted': deleted})
 
 
 @app.route('/api/deals/<int:deal_id>/refresh', methods=['POST'])
