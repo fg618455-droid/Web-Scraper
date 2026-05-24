@@ -43,6 +43,8 @@ playwright-check/
 
 # Config (falls Secrets drin landen)
 .env
+# eBay-Login-Cookies (Iter. 25) — niemals committen
+ebay_session.json
 
 # Build-Spec — alle ausser DealScraper.spec (vom CI gebraucht)
 *.spec
