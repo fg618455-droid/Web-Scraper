@@ -1199,6 +1199,7 @@ function openDrawer() {
   document.getElementById('drawer-overlay').classList.remove('hidden');
   loadDrawerTargets();
   loadDrawerAlerts();
+  loadDrawerPurchased();
   loadDrawerBlocked();
 }
 function closeDrawer() {
@@ -1255,6 +1256,7 @@ async function purchaseDealFromCard(dealId, btn) {
     });
     toast('Als gekauft markiert', 'success');
     loadDashboard();
+    loadDrawerPurchased();
   } catch {
     toast('Fehler beim Markieren', 'error');
   }
@@ -1271,10 +1273,26 @@ async function purchaseGroup(groupName, btn) {
     });
     toast(`${res.updated ?? 0} Deals als gekauft markiert`, 'success');
     loadDashboard();
+    loadDrawerPurchased();
   } catch {
     toast('Fehler beim Markieren der Gruppe', 'error');
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+async function unpurchaseDeal(dealId) {
+  try {
+    await api(`/api/deals/${dealId}/purchase`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purchased: false }),
+    });
+    toast('Wieder im Dashboard', 'success');
+    loadDrawerPurchased();
+    loadDashboard();
+  } catch {
+    toast('Fehler beim Rueckgaengig-Machen', 'error');
   }
 }
 
@@ -1315,6 +1333,40 @@ async function unblockSeller(website, seller) {
     loadDashboard();
   } catch { toast('Fehler', 'error'); }
 }
+
+async function loadDrawerPurchased() {
+  const list = document.getElementById('purchased-list');
+  if (!list) return;
+  try {
+    const deals = await api('/api/purchased');
+    if (!deals.length) {
+      list.innerHTML = '<p class="blocked-list-empty">Noch nichts als gekauft markiert.</p>';
+      return;
+    }
+    const fmt = new Intl.DateTimeFormat('de-DE', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+    });
+    list.innerHTML = deals.map(d => {
+      const when = d.purchased_at ? fmt.format(new Date(d.purchased_at)) : '–';
+      const price = d.price != null ? d.price.toLocaleString('de-DE') + ' €' : '–';
+      return `
+        <div class="blocked-item">
+          <div class="blocked-item-info">
+            <div class="blocked-item-title">${esc(d.title)}</div>
+            <div class="blocked-item-meta">${siteBadge(d.website)}
+              <span>${price}</span>
+              <span class="dim">· gekauft ${when}</span>
+            </div>
+          </div>
+          <button class="blocked-item-unblock" onclick="unpurchaseDeal(${d.id})"
+                  title="Wieder ins Dashboard zurueckholen">
+            Zurueck
+          </button>
+        </div>`;
+    }).join('');
+  } catch { /* silent */ }
+}
+
 
 async function loadDrawerBlocked() {
   const list = document.getElementById('blocked-list');
@@ -1873,10 +1925,13 @@ function renderAuctionChart(series) {
   if (!series.length) {
     return '<div class="auction-chart-empty">Noch keine Daten — die Historie wächst bei jedem Scrape.</div>';
   }
+  // series.length === 1 ist mit dem synthetischen "jetzt"-Punkt aus
+  // openAuctionModal eigentlich unreachable. Fallback fuer den absurden
+  // Edge-Case (DB-Snapshot existiert, d.price ist null) bleibt drin.
   if (series.length === 1) {
     return `<div class="auction-chart-empty">
-      Erst 1 Datenpunkt erfasst: ${series[0].p.toLocaleString('de-DE')} €.<br>
-      Sobald sich der Preis ändert (oder ein zweiter Scrape läuft), entsteht ein Verlauf.
+      Nur 1 Datenpunkt: ${series[0].p.toLocaleString('de-DE')} € am
+      ${new Date(series[0].t).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' })}.
     </div>`;
   }
   const W = 680, H = 220, pad = { l: 50, r: 16, t: 18, b: 30 };

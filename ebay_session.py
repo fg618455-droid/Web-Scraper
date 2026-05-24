@@ -98,9 +98,12 @@ def _run_login_flow() -> None:
 
             # eBay redirects away from /signin once login succeeds. We allow
             # up to 5 minutes; if the user cancels we land here on a Timeout.
+            # Case-insensitive: eBay sometimes uses /SignIn / /Signin variants.
             try:
                 page.wait_for_url(
-                    lambda u: '/signin' not in u and 'login' not in u.lower(),
+                    lambda u: ('/signin' not in u.lower()
+                               and 'login' not in u.lower()
+                               and 'identityweb' not in u.lower()),
                     timeout=300_000,
                 )
             except Exception:
