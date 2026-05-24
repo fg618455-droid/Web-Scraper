@@ -40,9 +40,6 @@ jobs:
       - name: Generate icon.ico (committed file is in .gitignore as app-generated)
         run: python make_icon.py
 
-      - name: Build .exe with PyInstaller (uses DealScraper.spec)
-        run: pyinstaller --noconfirm --clean DealScraper.spec
-
       - name: Determine version tag (or "manual" for workflow_dispatch)
         id: version
         shell: pwsh
@@ -54,6 +51,18 @@ jobs:
           }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Output "Version: $tag"
+
+      - name: Set version.json from tag (must run BEFORE PyInstaller so .exe ships with correct version)
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $version = $tag -replace '^v', ''
+          @{"version" = $version} | ConvertTo-Json | Set-Content version.json -Encoding utf8
+          Write-Output "version.json set to $version"
+          Get-Content version.json
+
+      - name: Build .exe with PyInstaller (uses DealScraper.spec)
+        run: pyinstaller --noconfirm --clean DealScraper.spec
 
       - name: Package dist/DealScraper into ZIP
         shell: pwsh

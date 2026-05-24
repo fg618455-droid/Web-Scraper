@@ -140,6 +140,16 @@ def _run_login_flow() -> None:
             try: browser.close()
             except Exception: pass
 
+            # Iter. 26: Reset bid-history cooldown — a fresh login means we
+            # should immediately retry, even if the previous unauthenticated
+            # attempts had triggered the 30-min Akamai cooldown.
+            try:
+                import scraper as _scr
+                _scr._EBAY_BLOCKED_UNTIL = 0
+                logger.info('bid-history cooldown reset after login save')
+            except Exception:
+                pass
+
             _set_state(
                 in_progress=False, last_result='ok',
                 last_message='Login gespeichert. Gebot-Auto-Import ist jetzt aktiv.',

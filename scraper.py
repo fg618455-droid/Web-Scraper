@@ -853,32 +853,46 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
 
     html = ''
 
-    # ── Attempt 1: plain requests (fast) ──────────────────────────────────
-    sess = requests.Session()
-    sess.headers.update(_BIG_SHOP_HEADERS)
+    # If the user has saved a login session, skip plain requests entirely —
+    # eBay blocks unauthenticated GETs to /bfl/viewbids/ with an Akamai-page
+    # that would set the cooldown and starve the authenticated Playwright
+    # path of its chance. Go straight to PW with storage_state. (Iter. 26)
+    have_login_session = False
     try:
-        sess.get(f'{proto}://{host}/', timeout=10)
-        r = sess.get(url, timeout=15)
-        if r.status_code == 200:
-            html = r.text
-    except Exception as e:
-        logger.debug('bid-history requests fetch failed for %s: %s', item_id, e)
+        from ebay_session import has_session as _ebay_has_session
+        have_login_session = _ebay_has_session()
+    except Exception:
+        pass
 
-    # Detect block FAST so we don't even attempt Playwright when eBay is in
-    # full-deny mode (saves ~25 s of wasted browser startup per call).
-    if _ebay_response_is_blocked(html):
-        _EBAY_BLOCKED_UNTIL = now + _EBAY_BLOCK_COOLDOWN_SEC
-        _save_debug_html('bid_history', item_id, html)
-        logger.warning(
-            'bid-history: eBay block page detected — cooldown enabled for %d min',
-            _EBAY_BLOCK_COOLDOWN_SEC // 60,
-        )
-        return []
+    # ── Attempt 1: plain requests (fast) — skipped when logged in ─────────
+    if not have_login_session:
+        sess = requests.Session()
+        sess.headers.update(_BIG_SHOP_HEADERS)
+        try:
+            sess.get(f'{proto}://{host}/', timeout=10)
+            r = sess.get(url, timeout=15)
+            if r.status_code == 200:
+                html = r.text
+        except Exception as e:
+            logger.debug('bid-history requests fetch failed for %s: %s', item_id, e)
 
-    bids = parse_ebay_bid_history(html) if html else []
-    if bids:
-        logger.info(f'bid-history for {item_id}: {len(bids)} bids parsed (requests)')
-        return bids
+        # Detect block FAST so we don't even attempt Playwright when eBay is in
+        # full-deny mode (saves ~25 s of wasted browser startup per call).
+        if _ebay_response_is_blocked(html):
+            _EBAY_BLOCKED_UNTIL = now + _EBAY_BLOCK_COOLDOWN_SEC
+            _save_debug_html('bid_history', item_id, html)
+            logger.warning(
+                'bid-history: eBay block page detected — cooldown enabled for %d min',
+                _EBAY_BLOCK_COOLDOWN_SEC // 60,
+            )
+            return []
+
+        bids = parse_ebay_bid_history(html) if html else []
+        if bids:
+            logger.info(f'bid-history for {item_id}: {len(bids)} bids parsed (requests)')
+            return bids
+    else:
+        logger.debug('bid-history: skipping requests path, using PW with login session')
 
     # ── Attempt 2: Playwright (JS-rendered pages) ─────────────────────────
     try:
@@ -892,6 +906,12 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
 
     try:
         with sync_playwright() as pw:
+            # Note (Iter. 26): even headless=False + stealth + a valid
+            # storage_state did NOT bypass eBay's Akamai 'splashui/captcha'
+            # block-page in testing. Keeping headless=True here because the
+            # heavy variant added a 5-10s window-spawn cost per call and was
+            # equally blocked. The manual paste flow (/api/deals/<id>/bid-
+            # history/import) remains the reliable path for bid-history.
             browser = pw.chromium.launch(headless=True, args=['--no-sandbox'])
             ctx_kwargs = dict(
                 user_agent=_BIG_SHOP_HEADERS.get('User-Agent', ''),
@@ -900,7 +920,7 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
             )
             # If the user logged in via the "eBay-Login"-button (Iter. 25),
             # inject the saved cookies so /bfl/viewbids/ returns the bid
-            # table instead of redirecting to /signin.
+            # table instead of redirecting to /signin (best-effort — see note).
             try:
                 from ebay_session import session_path_for_playwright
                 sess_path = session_path_for_playwright()
