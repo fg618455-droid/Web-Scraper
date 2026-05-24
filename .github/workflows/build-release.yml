@@ -37,6 +37,9 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\play
         run: python -m playwright install chromium
 
+      - name: Generate icon.ico (committed file is in .gitignore as app-generated)
+        run: python make_icon.py
+
       - name: Build .exe with PyInstaller (uses DealScraper.spec)
         run: pyinstaller --noconfirm --clean DealScraper.spec
 
