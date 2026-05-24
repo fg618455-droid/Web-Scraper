@@ -112,6 +112,14 @@ def _run_migrations(c):
         # Backfilled lazily by the background geocode thread in app.py.
         ('lat',              'REAL'),
         ('lon',              'REAL'),
+        # "Gekauft" marker (Iter. 25): hides the deal from all panels but
+        # keeps it in DB for the future "Was hab ich gekauft"-panel.
+        ('purchased',        'INTEGER DEFAULT 0'),
+        ('purchased_at',     'TEXT'),
+        # Versand-Verfügbarkeit (Iter. 25). NULL = unknown, 0 = no, 1 = yes.
+        # Combined with existing pickup_only this gives a tri-state badge:
+        # "Nur Abholung", "Versand", "Beides", or nothing if both unknown.
+        ('shipping_available', 'INTEGER'),
     ]:
         try:
             c.execute(f'ALTER TABLE deals ADD COLUMN {col} {typedef}')
@@ -333,6 +341,13 @@ def set_setting(key: str, value: str):
     conn.close()
 
 
+_ONLINE_SHIPS_BY_DEFAULT = {
+    'Mindfactory', 'Alternate', 'Gravis', 'future-x', 'Conrad',
+    'Refurbed', 'mac-store24', 'asgoodasnew', 'Apple',
+    'Idealo', 'notebooksbilliger', 'Cyberport', 'Amazon',
+}
+
+
 def insert_or_update_deal(deal):
     """Returns (is_new, deal_id, old_price). old_price is the previous DB
     price for existing deals (may be None) or None for new inserts — callers
@@ -340,6 +355,12 @@ def insert_or_update_deal(deal):
     conn = get_connection()
     c = conn.cursor()
     now = datetime.now().isoformat()
+
+    # Fallback: pure online shops always ship — set unless the scraper
+    # explicitly said otherwise. Classifieds (KA / markt.de / quoka / eBay)
+    # are heterogeneous so we leave the value to the scraper.
+    if deal.get('shipping_available') is None and deal.get('website') in _ONLINE_SHIPS_BY_DEFAULT:
+        deal['shipping_available'] = 1
 
     existing = c.execute('SELECT * FROM deals WHERE url = ?', (deal['url'],)).fetchone()
     is_new    = False
@@ -371,6 +392,7 @@ def insert_or_update_deal(deal):
             '''UPDATE deals
                SET title=?, price=?, website=?, ram=?, ssd=?, model=?,
                    image_url=?, description=?, location=?, pickup_only=?,
+                   shipping_available=COALESCE(?, shipping_available),
                    listing_type=?, seller=COALESCE(?, seller),
                    bid_count=?, auction_ends_at=COALESCE(?, auction_ends_at),
                    available=1, last_seen=?
@@ -379,6 +401,7 @@ def insert_or_update_deal(deal):
              deal.get('ram'), deal.get('ssd'), deal.get('model'),
              deal.get('image_url'), deal.get('description'),
              deal.get('location'), 1 if deal.get('pickup_only') else 0,
+             deal.get('shipping_available'),
              deal.get('listing_type'), deal.get('seller'),
              deal.get('bid_count'), deal.get('auction_ends_at'),
              now, deal['url'])
@@ -388,13 +411,14 @@ def insert_or_update_deal(deal):
         c.execute(
             '''INSERT INTO deals
                (title, price, url, website, found_at, ram, ssd, model,
-                image_url, description, location, pickup_only, listing_type,
-                seller, bid_count, auction_ends_at, last_seen)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                image_url, description, location, pickup_only, shipping_available,
+                listing_type, seller, bid_count, auction_ends_at, last_seen)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (deal['title'], deal['price'], deal['url'], deal['website'], now,
              deal.get('ram'), deal.get('ssd'), deal.get('model'),
              deal.get('image_url'), deal.get('description'),
              deal.get('location'), 1 if deal.get('pickup_only') else 0,
+             deal.get('shipping_available'),
              deal.get('listing_type'), deal.get('seller'),
              deal.get('bid_count'), deal.get('auction_ends_at'), now)
         )
@@ -422,6 +446,70 @@ def set_deal_blocked(deal_id: int, blocked: bool = True) -> None:
               (1 if blocked else 0, deal_id))
     conn.commit()
     conn.close()
+
+
+def set_deal_purchased(deal_id: int, purchased: bool = True) -> None:
+    """Mark a single deal as purchased (hides from all panels via _VISIBLE_SQL).
+    Stamps purchased_at so we can later sort by purchase date."""
+    conn = get_connection()
+    c = conn.cursor()
+    if purchased:
+        c.execute(
+            'UPDATE deals SET purchased = 1, purchased_at = ? WHERE id = ?',
+            (datetime.now().isoformat(), deal_id),
+        )
+    else:
+        c.execute(
+            'UPDATE deals SET purchased = 0, purchased_at = NULL WHERE id = ?',
+            (deal_id,),
+        )
+    conn.commit()
+    conn.close()
+
+
+def set_group_purchased(group_name: str, purchased: bool = True) -> int:
+    """Mark every active deal in the group's targets as purchased. Returns
+    the row count touched. Use case: 'ich hab das iPhone 17 Pro gekauft,
+    weg mit allen offenen Treffern'."""
+    conn = get_connection()
+    c = conn.cursor()
+    target_names = [r['name'] for r in c.execute(
+        'SELECT name FROM search_targets WHERE COALESCE(group_name, "") = ?',
+        (group_name or '',),
+    ).fetchall()]
+    if not target_names:
+        conn.close()
+        return 0
+    placeholders = ','.join('?' * len(target_names))
+    if purchased:
+        cur = c.execute(
+            f'UPDATE deals SET purchased = 1, purchased_at = ? '
+            f'WHERE model IN ({placeholders}) AND COALESCE(purchased, 0) = 0',
+            (datetime.now().isoformat(), *target_names),
+        )
+    else:
+        cur = c.execute(
+            f'UPDATE deals SET purchased = 0, purchased_at = NULL '
+            f'WHERE model IN ({placeholders}) AND purchased = 1',
+            target_names,
+        )
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
+def get_purchased_deals(limit: int = 100) -> list[dict]:
+    """List recently purchased deals (newest first). For a future
+    'Was hab ich gekauft?' panel."""
+    conn = get_connection()
+    rows = conn.execute(
+        'SELECT * FROM deals WHERE purchased = 1 '
+        'ORDER BY purchased_at DESC LIMIT ?',
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def block_seller(website: str, seller: str) -> None:
@@ -485,6 +573,7 @@ def set_apple_price(target_name: str, price: float | None) -> None:
 #   3. price >= target.min_price (per-target fake floor; falls back to 100)
 _VISIBLE_SQL = (
     "deals.blocked = 0 "
+    "AND COALESCE(deals.purchased, 0) = 0 "
     "AND NOT EXISTS ("
     "  SELECT 1 FROM blocked_sellers bs "
     "  WHERE bs.website = deals.website "

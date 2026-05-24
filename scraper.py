@@ -400,8 +400,14 @@ def scrape_kleinanzeigen(targets: list[dict]) -> list[dict]:
                                 image_url = _best_image(img_el)
                                 location  = loc_el.get_text(' ', strip=True)[:80] if loc_el else None
                                 ship_text = ship_el.get_text(' ', strip=True).lower() if ship_el else ''
-                                has_ship  = 'versand' in ship_text and 'kein' not in ship_text
-                                pickup    = _detect_pickup_only(title, desc, has_ship)
+                                # Tri-state: True (versand möglich), False ("kein versand"), None (unknown).
+                                if 'kein' in ship_text and 'versand' in ship_text:
+                                    has_ship = False
+                                elif 'versand' in ship_text:
+                                    has_ship = True
+                                else:
+                                    has_ship = None
+                                pickup    = _detect_pickup_only(title, desc, bool(has_ship))
 
                                 href = link_el.get('href', '')
                                 if href.startswith('/'):
@@ -421,6 +427,9 @@ def scrape_kleinanzeigen(targets: list[dict]) -> list[dict]:
                                     'description':  desc,
                                     'location':     location,
                                     'pickup_only':  pickup,
+                                    'shipping_available': (1 if has_ship is True
+                                                           else 0 if has_ship is False
+                                                           else None),
                                     'listing_type': 'fixed',
                                 })
                                 found_this_url += 1

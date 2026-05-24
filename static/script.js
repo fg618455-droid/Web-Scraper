@@ -69,6 +69,27 @@ function icon(name, cls = '') {
   return `<svg class="${cls}"><use href="#i-${name}"/></svg>`;
 }
 
+/* ── Versand/Abholung-Badge (Iter. 25) ───────────────────────────────
+   Returns {icon, label, cls} or null. Online-Shops bekommen NICHTS
+   ("Versand" ist da implizit) — Badge nur fuer Kleinanzeigen / markt /
+   quoka / eBay wo es echt eine Wahl gibt. */
+const _CLASSIFIED_SITES = new Set(['Kleinanzeigen', 'markt.de', 'quoka', 'eBay']);
+function shippingBadge(d) {
+  const isClassified = _CLASSIFIED_SITES.has(d.website);
+  const pickup  = d.pickup_only === 1 || d.pickup_only === true;
+  const ships   = d.shipping_available === 1;
+  const noShip  = d.shipping_available === 0;
+  if (pickup && ships)       return { icon: 'package',   label: 'Abholung + Versand', cls: 'tag-both' };
+  if (pickup || noShip)      return { icon: 'truck-off', label: 'Nur Abholung',       cls: 'tag-pickup' };
+  if (ships && isClassified) return { icon: 'package',   label: 'Versand',            cls: 'tag-ship' };
+  return null;
+}
+function shippingBadgeHtml(d, wrapperClass = 'deal-tag') {
+  const b = shippingBadge(d);
+  if (!b) return '';
+  return `<span class="${wrapperClass} ${b.cls}">${icon(b.icon)} ${b.label}</span>`;
+}
+
 /* ── Toast ───────────────────────────────────────────────────────── */
 const TOAST_ICONS = {
   success: 'check',
@@ -244,6 +265,10 @@ function buildGroupedSections(targets) {
             onclick="event.stopPropagation(); openGroupSourcePicker(${esc(JSON.stringify(g.name))}, this)">
       ${icon('settings')}
     </button>
+    <button class="btn-icon group-purchase-btn" title="Alle aktiven Deals dieser Gruppe als gekauft markieren"
+            onclick="event.stopPropagation(); purchaseGroup(${esc(JSON.stringify(g.name))}, this)">
+      ${icon('check')}
+    </button>
   </header>
   <div class="group-body">${g.targets.map(buildSection).join('')}</div>
 </section>`;
@@ -294,7 +319,7 @@ function buildTopCard(d) {
   const isNew = d.found_at && (Date.now() - new Date(d.found_at).getTime()) < 86_400_000;
   if (isNew) tags.push(`<span class="top-cat-tag tag-new">${icon('spark')} Neu</span>`);
   tags.push(`<span class="top-cat-tag tag-best">${icon('crown')} Bestpreis</span>`);
-  if (d.pickup_only) tags.push(`<span class="top-cat-tag tag-pickup">${icon('truck-off')} Nur Abholung</span>`);
+  { const b = shippingBadge(d); if (b) tags.push(`<span class="top-cat-tag ${b.cls}">${icon(b.icon)} ${b.label}</span>`); }
   if (d.listing_type === 'auction')
     tags.push(`<span class="top-cat-tag tag-auction">${icon('gavel')} Auktion</span>`);
   else if (d.listing_type === 'fixed')
@@ -506,7 +531,7 @@ function dealCard(d, stats = {}) {
     tags.push(`<span class="deal-tag tag-best">${icon('crown')} Bestpreis</span>`);
   if (d.price != null && stats.avg_price != null && d.price < stats.avg_price * 0.85)
     tags.push(`<span class="deal-tag tag-deal">${icon('flame')} Deal</span>`);
-  if (d.pickup_only) tags.push(`<span class="deal-tag tag-pickup">${icon('truck-off')} Nur Abholung</span>`);
+  { const b = shippingBadge(d); if (b) tags.push(`<span class="deal-tag ${b.cls}">${icon(b.icon)} ${b.label}</span>`); }
   // Auktion vs Festpreis — always show so user knows at a glance
   if (d.listing_type === 'auction')
     tags.push(`<span class="deal-tag tag-auction">${icon('gavel')} Auktion</span>`);
@@ -586,6 +611,9 @@ function blockMenuHtml(d) {
     ${icon('x')}
   </button>
   <div class="card-menu-popup hidden">
+    <button onclick="event.stopPropagation();event.preventDefault();purchaseDealFromCard(${d.id}, this)">
+      ${icon('check')} Als gekauft markieren
+    </button>
     <button class="danger" onclick="event.stopPropagation();event.preventDefault();blockDealFromCard(${d.id}, this)">
       ${icon('ban')} Angebot ausblenden
     </button>
@@ -672,7 +700,7 @@ function buildTable(deals) {
 
     const meta = [
       d.location ? `${icon('pin')}<span>${esc(d.location)}${d.distance_km != null ? ` · ${d.distance_km} km` : ''}</span>` : '',
-      d.pickup_only ? `<span class="td-pickup">${icon('truck-off')} Nur Abholung</span>` : '',
+      (() => { const b = shippingBadge(d); return b ? `<span class="td-pickup ${b.cls}">${icon(b.icon)} ${b.label}</span>` : ''; })(),
     ].filter(Boolean).join('');
 
     return `<tr class="${cls}">
@@ -1141,6 +1169,38 @@ async function blockDealFromCard(dealId, btn) {
   }
 }
 
+async function purchaseDealFromCard(dealId, btn) {
+  try {
+    await api(`/api/deals/${dealId}/purchase`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purchased: true }),
+    });
+    toast('Als gekauft markiert', 'success');
+    loadDashboard();
+  } catch {
+    toast('Fehler beim Markieren', 'error');
+  }
+}
+
+async function purchaseGroup(groupName, btn) {
+  if (!confirm(`Alle aktiven Deals in „${groupName}" als gekauft markieren?\n(Versteckt sie aus dem Dashboard, Preis-Historie bleibt erhalten.)`)) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api(`/api/groups/${encodeURIComponent(groupName)}/purchase`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ purchased: true }),
+    });
+    toast(`${res.updated ?? 0} Deals als gekauft markiert`, 'success');
+    loadDashboard();
+  } catch {
+    toast('Fehler beim Markieren der Gruppe', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function blockSellerFromCard(website, seller, btn) {
   if (!confirm(`Alle Angebote von „${seller}" auf ${website} blockieren?`)) return;
   try {
@@ -1478,26 +1538,40 @@ async function openAuctionModal(dealId) {
     importBtn.dataset.dealId = dealId;
     importBtn.disabled = false;
 
-    // Build chart
+    // Build chart series from price_history.
+    // The DB stores ISO timestamps WITHOUT a "Z" suffix, which modern JS
+    // interprets as LOCAL time — matches what database.py wrote with
+    // datetime.now().isoformat(). So no TZ conversion needed.
     const series = historyRows.map(r => ({
       t: new Date(r.changed_at).getTime(),
       p: r.price,
       bidder: r.bidder || null,
       source: r.source || 'snapshot',
     }));
-    // Only append "now" for fallback snapshots. For imported eBay bids the
-    // series is authoritative, and adding current price would create a fake time.
-    if (!hasBidHistory && d.price != null && (!series.length || series[series.length - 1].p !== d.price)) {
-      series.push({ t: Date.now(), p: d.price });
+    // For fallback snapshots: append a synthetic "jetzt" point so the chart
+    // always shows at least a line (not just text) and the visible time-axis
+    // extends to now. Skipped for imported eBay bids (authoritative timeline).
+    // Synthetic flag is used by the table renderer to label this row as
+    // "jetzt (live)" instead of pretending it was a recorded snapshot.
+    if (!hasBidHistory && d.price != null) {
+      const lastT = series.length ? series[series.length - 1].t : 0;
+      const nowMs = Date.now();
+      if (nowMs - lastT > 30_000) {  // skip if a snapshot is already from the last 30s
+        series.push({ t: nowMs, p: d.price, synthetic: true });
+      }
     }
     const chartSeries = hasBidHistory ? buildAuctionProgressSeries(series) : series;
     chart.innerHTML = renderAuctionChart(chartSeries);
 
-    // History table
+    // History table — 4-digit year, no ambiguity (DD.MM.YYYY HH:MM).
     if (series.length) {
+      const fmt = new Intl.DateTimeFormat('de-DE', {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      });
       const rows = [...series].reverse().map(r => `
-        <tr>
-          <td>${new Date(r.t).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}</td>
+        <tr${r.synthetic ? ' class="snapshot-now"' : ''}>
+          <td>${fmt.format(new Date(r.t))}${r.synthetic ? ' <span class="dim text-xs">· jetzt (live)</span>' : ''}</td>
           ${hasBidHistory ? `<td>${esc(r.bidder || '–')}</td>` : ''}
           <td class="price-cell">${r.p.toLocaleString('de-DE')} €</td>
         </tr>`).join('');

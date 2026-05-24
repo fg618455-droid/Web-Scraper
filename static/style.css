@@ -609,6 +609,8 @@ main::-webkit-scrollbar-thumb:hover {
 .top-cat-tag.tag-new     { background: rgba(56, 189, 248, 0.16); color: #38bdf8; }
 .top-cat-tag.tag-best    { background: rgba(251, 191, 36, 0.16); color: #fbbf24; }
 .top-cat-tag.tag-pickup  { background: rgba(251, 146, 60, 0.16); color: #fb923c; }
+.top-cat-tag.tag-ship    { background: rgba(45, 212, 191, 0.16); color: #2dd4bf; }
+.top-cat-tag.tag-both    { background: rgba(99, 102, 241, 0.16); color: #818cf8; }
 /* Auction (rose) vs fixed-price (teal) — always shown, source of truth */
 .top-cat-tag.tag-auction { background: rgba(244, 114, 182, 0.16); color: #f472b6; }
 .top-cat-tag.tag-fixed   { background: rgba(45, 212, 191, 0.16); color: #2dd4bf; }
@@ -921,6 +923,8 @@ main::-webkit-scrollbar-thumb:hover {
 .tag-best    { background: var(--amber-soft);             color: #fbbf24; }
 .tag-new     { background: var(--green-soft);             color: var(--green); }
 .tag-pickup  { background: rgba(251, 146, 60, 0.16);     color: #fb923c; }
+.tag-ship    { background: rgba(45, 212, 191, 0.16);     color: #2dd4bf; }
+.tag-both    { background: rgba(99, 102, 241, 0.16);     color: #818cf8; }
 .tag-auction { background: rgba(244, 114, 182, 0.16);    color: #f472b6; }
 .tag-fixed   { background: rgba(45, 212, 191, 0.16);     color: #2dd4bf; }
 

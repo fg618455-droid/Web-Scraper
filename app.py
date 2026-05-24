@@ -624,6 +624,32 @@ def api_unblock_deal(deal_id: int):
     return jsonify({'ok': True})
 
 
+@app.route('/api/deals/<int:deal_id>/purchase', methods=['POST'])
+def api_purchase_deal(deal_id: int):
+    """Mark this deal as purchased — hides it from all panels but keeps
+    the row + price-history. Body: {"purchased": bool} (defaults true)."""
+    data = request.get_json(force=True, silent=True) or {}
+    purchased = bool(data.get('purchased', True))
+    db.set_deal_purchased(deal_id, purchased)
+    return jsonify({'ok': True, 'purchased': purchased})
+
+
+@app.route('/api/groups/<path:group_name>/purchase', methods=['POST'])
+def api_purchase_group(group_name: str):
+    """Mark every active deal in the group's targets as purchased.
+    Use case: bought one iPhone — clear all the other open hits in one click."""
+    data = request.get_json(force=True, silent=True) or {}
+    purchased = bool(data.get('purchased', True))
+    n = db.set_group_purchased(group_name, purchased)
+    return jsonify({'ok': True, 'purchased': purchased, 'updated': n})
+
+
+@app.route('/api/purchased')
+def api_purchased():
+    """List recently purchased deals (for the 'Was hab ich gekauft?' panel)."""
+    return jsonify(db.get_purchased_deals())
+
+
 @app.route('/api/deals/<int:deal_id>/refresh', methods=['POST'])
 def api_refresh_deal(deal_id: int):
     """Re-fetch a single eBay item right now and write the latest price as a
