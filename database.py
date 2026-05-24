@@ -319,13 +319,17 @@ def set_setting(key: str, value: str):
 
 
 def insert_or_update_deal(deal):
+    """Returns (is_new, deal_id, old_price). old_price is the previous DB
+    price for existing deals (may be None) or None for new inserts — callers
+    use it to detect price drops without a second SELECT."""
     conn = get_connection()
     c = conn.cursor()
     now = datetime.now().isoformat()
 
     existing = c.execute('SELECT * FROM deals WHERE url = ?', (deal['url'],)).fetchone()
-    is_new   = False
-    deal_id  = None
+    is_new    = False
+    deal_id   = None
+    old_price = existing['price'] if existing else None
     is_auction = deal.get('listing_type') == 'auction'
 
     if existing:
@@ -391,7 +395,7 @@ def insert_or_update_deal(deal):
 
     conn.commit()
     conn.close()
-    return is_new, deal_id
+    return is_new, deal_id, old_price
 
 
 # ── Block-by-deal / block-by-seller helpers ─────────────────────────────────

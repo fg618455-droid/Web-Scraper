@@ -1276,25 +1276,41 @@ def _parse_mac_store24_page(html: str, default_model: str, keyword: str | None =
 
 
 def _scrape_mac_store24_json(keyword: str, default_model: str):
-    '''Shopify JSON search API -- returns list of deals or None on failure.'''
+    '''Shopify Predictive Search API -- returns list of deals or None on failure.
+
+    /search.json liefert auf mac-store24 nur Theme-HTML (Content-Type lügt).
+    /search/suggest.json ist die offizielle Shopify-API und liefert echtes JSON.
+    Preise kommen als Euro-Strings ("1699.00"), NICHT in Cents.
+    '''
     url = (
-        'https://www.mac-store24.com/search.json'
-        '?q={}&type=product&limit=50'.format(keyword.replace(' ', '+'))
+        'https://www.mac-store24.com/search/suggest.json'
+        '?q={}&resources[type]=product&resources[limit]=10'
+        .format(keyword.replace(' ', '+'))
     )
+    headers = dict(HEADERS)
+    headers['Accept'] = 'application/json'
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code != 200:
             logger.debug('mac-store24 JSON API HTTP %s', resp.status_code)
+            return None
+        body_preview = resp.text[:80].lstrip()
+        if not body_preview.startswith('{'):
+            logger.warning('mac-store24 suggest.json kein JSON, body=%r', body_preview)
             return None
         data = resp.json()
     except Exception as exc:
         logger.debug('mac-store24 JSON API error: %s', exc)
         return None
 
-    products = data.get('results', []) or data.get('products', [])
+    products = (
+        data.get('resources', {})
+            .get('results', {})
+            .get('products', [])
+    )
     if not products:
-        logger.debug('mac-store24 JSON API: 0 products')
-        return None
+        logger.debug('mac-store24 suggest.json: 0 products for %r', keyword)
+        return []
 
     deals = []
     for prod in products:
@@ -1302,18 +1318,11 @@ def _scrape_mac_store24_json(keyword: str, default_model: str):
             title = prod.get('title', '')
             if not title or _is_unwanted(title, None, keyword):
                 continue
-            price_raw = None
-            variants = prod.get('variants', [])
-            if variants:
-                price_raw = variants[0].get('price')
-            if price_raw is None:
-                price_raw = prod.get('price_min') or prod.get('price')
+            price_raw = prod.get('price') or prod.get('price_min')
             if price_raw is None:
                 continue
             try:
                 price = float(str(price_raw).replace(',', '.'))
-                if price > 10000:
-                    price = price / 100.0
             except (ValueError, TypeError):
                 continue
             if price < 100:
@@ -1323,10 +1332,13 @@ def _scrape_mac_store24_json(keyword: str, default_model: str):
                 continue
             url_prod = 'https://www.mac-store24.com/products/' + handle
             image_url = None
-            images = prod.get('images', [])
-            if images:
-                img = images[0]
-                image_url = img if isinstance(img, str) else img.get('src')
+            feat = prod.get('featured_image') or {}
+            if isinstance(feat, dict):
+                image_url = feat.get('url')
+            if not image_url:
+                img = prod.get('image')
+                if isinstance(img, str):
+                    image_url = img
             deals.append({
                 'title':        title[:255],
                 'price':        price,
@@ -1336,7 +1348,7 @@ def _scrape_mac_store24_json(keyword: str, default_model: str):
                 'ram':          _extract_ram(title),
                 'ssd':          _extract_ssd(title),
                 'image_url':    image_url,
-                'description':  (prod.get('body_html') or '')[:500] or None,
+                'description':  (prod.get('body') or prod.get('body_html') or '')[:500] or None,
                 'pickup_only':  False,
                 'listing_type': 'fixed',
             })

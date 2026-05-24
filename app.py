@@ -72,18 +72,37 @@ def _build_callback(restrict_model: str | set | None = None):
         by_website = defaultdict(set)
 
         for deal in deals:
-            is_new, deal_id = db.insert_or_update_deal(deal)
+            is_new, deal_id, old_price = db.insert_or_update_deal(deal)
             by_website[deal['website']].add(deal['url'])
 
-            if is_new and deal.get('price') is not None:
-                for alert in alerts:
-                    if alert['active'] and alert['model'] == deal.get('model'):
-                        if deal['price'] <= alert['threshold']:
-                            db.log_alert(alert['id'], deal_id, deal['price'])
-                            send_notification(
-                                f"Deal! {deal['model']}",
-                                f"{deal['title'][:80]}\n{deal['price']:.0f}€ – {deal['website']}",
-                            )
+            price = deal.get('price')
+            if price is None:
+                continue
+            for alert in alerts:
+                if not alert['active'] or alert['model'] != deal.get('model'):
+                    continue
+                threshold = alert['threshold']
+                if price > threshold:
+                    continue
+                # Trigger exactly when the deal CROSSES the threshold:
+                #  - brand-new deal already under threshold, OR
+                #  - existing deal whose previous price was above threshold
+                #    (or unknown) and dropped to/below it.
+                # Once old_price <= threshold the condition is false again,
+                # so no spam on repeat scrapes.
+                crossed = is_new or old_price is None or old_price > threshold
+                if not crossed:
+                    continue
+                db.log_alert(alert['id'], deal_id, price)
+                if is_new:
+                    title = f"Deal! {deal['model']}"
+                else:
+                    drop = old_price - price if old_price else 0
+                    title = f"Preis gefallen: {deal['model']} -{drop:.0f}€"
+                send_notification(
+                    title,
+                    f"{deal['title'][:80]}\n{price:.0f}€ – {deal['website']}",
+                )
 
         for website, urls in by_website.items():
             # For subset scrapes (set of model names) we have to call
