@@ -282,6 +282,21 @@
     </section>
 
     <section class="drawer-section">
+      <h3><svg class="h3-icon"><use href="#i-tag"/></svg> Umkreis-Filter</h3>
+      <p class="dim text-xs" style="margin: 0 0 8px;">Versteckt Kleinanzeigen-Deals außerhalb deines Radius. Online-Shops bleiben sichtbar.</p>
+      <div class="alert-form">
+        <div class="alert-form-row">
+          <input id="plz-input" type="text" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" placeholder="PLZ (z.B. 80331)" autocomplete="postal-code" />
+          <span id="plz-status" class="dim text-xs" style="min-width: 80px;">aus</span>
+        </div>
+        <div class="alert-form-row" style="align-items: center; gap: 10px;">
+          <input id="radius-slider" type="range" min="0" max="500" step="10" value="0" style="flex: 1;" />
+          <span id="radius-label" class="dim text-xs" style="min-width: 55px; text-align: right; font-variant-numeric: tabular-nums;">aus</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="drawer-section">
       <h3><svg class="h3-icon"><use href="#i-ban"/></svg> Blockiert</h3>
       <div id="blocked-list" class="blocked-list">
         <p class="dim text-xs">Nichts blockiert.</p>

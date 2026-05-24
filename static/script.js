@@ -6,6 +6,64 @@
 // Powers the inline "Gruppe" dropdown on each category row.
 let _groupsList = [];
 
+/* ── PLZ-Umkreis-Filter state (Iter. 24) ───────────────────────────
+   Loaded from /api/settings/filter on boot, persisted on change.
+   When active (plz set + radius > 0), every /api/deals & /api/top-deals
+   call gets ?plz=…&radius_km=… appended via withFilterParams(). */
+let _filterPlz    = '';
+let _filterRadius = 0;  // km, 0 = filter disabled
+let _filterSaveTimer = null;
+
+function withFilterParams(url) {
+  if (!_filterPlz || _filterRadius <= 0) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}plz=${encodeURIComponent(_filterPlz)}&radius_km=${_filterRadius}`;
+}
+
+async function loadFilterSettings() {
+  try {
+    const s = await api('/api/settings/filter');
+    _filterPlz    = s.plz || '';
+    _filterRadius = Number(s.radius_km) || 0;
+    syncFilterUI();
+  } catch { /* silent — backend may be old */ }
+}
+
+function syncFilterUI() {
+  const plzIn  = document.getElementById('plz-input');
+  const slider = document.getElementById('radius-slider');
+  const label  = document.getElementById('radius-label');
+  const status = document.getElementById('plz-status');
+  if (plzIn  && plzIn.value  !== _filterPlz)      plzIn.value  = _filterPlz;
+  if (slider && Number(slider.value) !== _filterRadius) slider.value = String(_filterRadius);
+  if (label)  label.textContent = _filterRadius > 0 ? `${_filterRadius} km` : 'aus';
+  if (status) {
+    const active = _filterPlz && _filterRadius > 0;
+    status.textContent = active ? 'aktiv' : 'aus';
+    status.style.color = active ? 'var(--accent, #8b5cf6)' : '';
+  }
+}
+
+function scheduleFilterSave() {
+  syncFilterUI();
+  if (_filterSaveTimer) clearTimeout(_filterSaveTimer);
+  _filterSaveTimer = setTimeout(saveFilterSettings, 500);
+}
+
+async function saveFilterSettings() {
+  try {
+    await api('/api/settings/filter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plz: _filterPlz, radius_km: _filterRadius }),
+    });
+    // Reload visible data so the filter immediately reflects.
+    loadDashboard();
+  } catch {
+    toast('Filter konnte nicht gespeichert werden', 'error');
+  }
+}
+
 /* ── Icon helper ─────────────────────────────────────────────────── */
 function icon(name, cls = '') {
   return `<svg class="${cls}"><use href="#i-${name}"/></svg>`;
@@ -98,7 +156,7 @@ async function loadDashboard() {
   try {
     const [data, topDealsRaw, groupsRaw] = await Promise.allSettled([
       api('/api/dashboard'),
-      api('/api/top-deals'),
+      api(withFilterParams('/api/top-deals')),
       api('/api/groups'),
     ]).then(results => [
       results[0].status === 'fulfilled' ? results[0].value : [],
@@ -246,7 +304,7 @@ function buildTopCard(d) {
 
   const specs = [d.ram, d.ssd].filter(Boolean).join(' · ');
   const specsHtml  = specs ? `<div class="top-cat-specs">${esc(specs)}</div>` : '';
-  const locHtml    = d.location ? `<div class="top-cat-loc">${icon('pin')}<span>${esc(d.location)}</span></div>` : '';
+  const locHtml    = d.location ? `<div class="top-cat-loc">${icon('pin')}<span>${esc(d.location)}${d.distance_km != null ? ` · ${d.distance_km} km` : ''}</span></div>` : '';
   const descSnippet = d.description ? esc(d.description.slice(0, 95)) : '';
   const descHtml   = descSnippet ? `<div class="top-cat-desc">${descSnippet}</div>` : '';
   const appleHtml  = savingsApple > 0
@@ -381,7 +439,7 @@ async function loadPanel(panel, model, stats) {
   panel.innerHTML = `<div class="loading-skel" style="padding:.9rem 1rem">
     <div class="skel-row" style="height:88px"></div></div>`;
   try {
-    const deals = await api(`/api/deals?model=${encodeURIComponent(model)}&available_only=1&sort=price&order=ASC`);
+    const deals = await api(withFilterParams(`/api/deals?model=${encodeURIComponent(model)}&available_only=1&sort=price&order=ASC`));
     panel.innerHTML = buildPanel(deals, stats);
     panel.dataset.loaded = '1';
     const tableWrap = panel.querySelector('.panel-table');
@@ -479,7 +537,7 @@ function dealCard(d, stats = {}) {
     : '';
 
   const locationHtml = d.location
-    ? `<div class="deal-location">${icon('pin')}<span>${esc(d.location)}</span></div>`
+    ? `<div class="deal-location">${icon('pin')}<span>${esc(d.location)}${d.distance_km != null ? ` · ${d.distance_km} km` : ''}</span></div>`
     : '';
 
   const appleHtml = savingsApple > 0
@@ -613,7 +671,7 @@ function buildTable(deals) {
     const cls   = d.available ? '' : 'unavailable';
 
     const meta = [
-      d.location ? `${icon('pin')}<span>${esc(d.location)}</span>` : '',
+      d.location ? `${icon('pin')}<span>${esc(d.location)}${d.distance_km != null ? ` · ${d.distance_km} km` : ''}</span>` : '',
       d.pickup_only ? `<span class="td-pickup">${icon('truck-off')} Nur Abholung</span>` : '',
     ].filter(Boolean).join('');
 
@@ -654,7 +712,7 @@ function initTableSort(wrap, model) {
       wrap.querySelectorAll('thead th').forEach(h => h.classList.remove('asc', 'desc'));
       th.classList.add(sortOrder === 'ASC' ? 'asc' : 'desc');
       try {
-        const deals = await api(`/api/deals?model=${encodeURIComponent(model)}&available_only=1&sort=${col}&order=${sortOrder}`);
+        const deals = await api(withFilterParams(`/api/deals?model=${encodeURIComponent(model)}&available_only=1&sort=${col}&order=${sortOrder}`));
         const tbody = wrap.querySelector('tbody');
         if (tbody) {
           const match = buildTable(deals).match(/<tbody>([\s\S]*)<\/tbody>/);
@@ -1858,6 +1916,18 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('export-btn').addEventListener('click', () => {
     window.location.href = '/api/export/csv';
     toast('CSV wird heruntergeladen…', 'info');
+  });
+
+  // PLZ-Umkreis-Filter (Iter. 24)
+  loadFilterSettings();
+  document.getElementById('plz-input')?.addEventListener('input', e => {
+    _filterPlz = e.target.value.replace(/\D/g, '').slice(0, 5);
+    if (e.target.value !== _filterPlz) e.target.value = _filterPlz;
+    scheduleFilterSave();
+  });
+  document.getElementById('radius-slider')?.addEventListener('input', e => {
+    _filterRadius = Number(e.target.value) || 0;
+    scheduleFilterSave();
   });
 
   // Keyboard shortcuts

@@ -18,6 +18,7 @@ from flask import Flask, Response, jsonify, render_template, request, send_from_
 
 import database as db
 import scraper
+from geocoder import geocode
 from notifier import send_notification
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -62,6 +63,12 @@ _auction_refresh_thread: threading.Thread | None = None
 _auction_refresh_stop = threading.Event()
 AUCTION_REFRESH_EVERY_SEC = 30 * 60   # every 30 min
 AUCTION_REFRESH_MAX_ITEMS = 25        # cap per pass — avoid hammering eBay
+
+# Background geocode thread state (Iter. 24 PLZ filter)
+_geocode_thread: threading.Thread | None = None
+_geocode_stop = threading.Event()
+GEOCODE_EVERY_SEC = 90                # short loop — Nominatim is cheap when cached
+GEOCODE_MAX_PER_PASS = 30             # 30 × 1.1 s rate-limit = ~33 s per pass
 
 
 def _build_callback(restrict_model: str | set | None = None):
@@ -287,6 +294,56 @@ def _start_auction_refresh() -> None:
     _auction_refresh_thread.start()
 
 
+def _geocode_loop() -> None:
+    """Background geocoding for deals that have a location string but no
+    coords yet. Two phases per pass:
+      1. backfill_deal_coords_from_cache() — cheap SQL, propagates any
+         cached geocodes (e.g. a freshly scraped Munich deal inherits the
+         coords resolved last week).
+      2. For up to GEOCODE_MAX_PER_PASS distinct *new* locations, call
+         Nominatim (rate-limited to 1.1 req/s inside the geocoder), cache
+         the result, then backfill again so all deals with that location
+         pick up the new coords.
+
+    Nominatim is free but throttled — keeping the per-pass cap modest avoids
+    starving the rate-limit when other features eventually want geocoding.
+    """
+    logger.info('Geocode thread started '
+                f'(every {GEOCODE_EVERY_SEC}s, max {GEOCODE_MAX_PER_PASS} new locations per pass)')
+    while not _geocode_stop.wait(GEOCODE_EVERY_SEC):
+        try:
+            n_backfilled = db.backfill_deal_coords_from_cache()
+            locations = db.get_distinct_locations_needing_geocode(GEOCODE_MAX_PER_PASS)
+            if not locations:
+                if n_backfilled:
+                    logger.info(f'Geocode: backfilled {n_backfilled} deals from cache, no new locations')
+                continue
+            n_ok = 0
+            for loc in locations:
+                if _geocode_stop.is_set():
+                    break
+                if geocode(loc) is not None:
+                    n_ok += 1
+            n_backfilled2 = db.backfill_deal_coords_from_cache()
+            logger.info(
+                f'Geocode pass: {n_ok}/{len(locations)} locations resolved, '
+                f'{n_backfilled + n_backfilled2} deals updated'
+            )
+        except Exception:
+            logger.exception('Geocode pass crashed')
+
+
+def _start_geocode_thread() -> None:
+    global _geocode_thread
+    if _geocode_thread and _geocode_thread.is_alive():
+        return
+    _geocode_stop.clear()
+    _geocode_thread = threading.Thread(
+        target=_geocode_loop, daemon=True, name='geocode'
+    )
+    _geocode_thread.start()
+
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -299,6 +356,47 @@ def api_deal_by_id(deal_id):
     if deal is None:
         return jsonify({'error': 'Deal not found'}), 404
     return jsonify(deal)
+
+
+def _apply_plz_radius_filter(deals: list[dict],
+                             plz: str | None,
+                             radius_km: float) -> list[dict]:
+    """Filter a deals list by PLZ + radius (Iter. 24).
+
+    Deals without geocoded coords pass through unfiltered — covers online
+    shops (Mindfactory etc.) and classifieds whose location hasn't been
+    geocoded yet, so the filter never silently hides anything.
+
+    Adds a 'distance_km' field (rounded float, or None) to each kept deal."""
+    if not plz or radius_km <= 0:
+        return deals
+    user_coords = geocode(plz)
+    if not user_coords:
+        logger.warning('PLZ filter: could not geocode %r', plz)
+        return deals
+    from geocoder import haversine_km
+    u_lat, u_lon = user_coords
+    kept = []
+    for d in deals:
+        lat, lon = d.get('lat'), d.get('lon')
+        if lat is None or lon is None:
+            d['distance_km'] = None
+            kept.append(d)
+            continue
+        dist = haversine_km(u_lat, u_lon, lat, lon)
+        if dist <= radius_km:
+            d['distance_km'] = round(dist, 1)
+            kept.append(d)
+    return kept
+
+
+def _read_plz_radius_args() -> tuple[str, float]:
+    plz = (request.args.get('plz') or '').strip()
+    try:
+        radius_km = float(request.args.get('radius_km') or 0)
+    except ValueError:
+        radius_km = 0.0
+    return plz, radius_km
 
 
 @app.route('/api/deals')
@@ -315,10 +413,38 @@ def api_deals():
             'min_price': float(request.args['min_price']) if request.args.get('min_price') else None,
             'max_price': float(request.args['max_price']) if request.args.get('max_price') else None,
         }
-        return jsonify(db.get_all_deals(filters))
+        deals = db.get_all_deals(filters)
+        plz, radius_km = _read_plz_radius_args()
+        deals = _apply_plz_radius_filter(deals, plz, radius_km)
+        return jsonify(deals)
     except Exception as e:
         logger.exception('api_deals error: %s', e)
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/settings/filter', methods=['GET'])
+def api_get_filter_settings():
+    """Return persisted PLZ-Umkreis-Filter settings."""
+    return jsonify({
+        'plz':       db.get_setting('filter_plz', '') or '',
+        'radius_km': int(db.get_setting('filter_radius_km', '0') or 0),
+    })
+
+
+@app.route('/api/settings/filter', methods=['POST'])
+def api_save_filter_settings():
+    data = request.get_json(force=True, silent=True) or {}
+    plz = str(data.get('plz', '')).strip()
+    try:
+        radius_km = max(0, int(data.get('radius_km', 0)))
+    except (ValueError, TypeError):
+        radius_km = 0
+    db.set_setting('filter_plz',       plz)
+    db.set_setting('filter_radius_km', str(radius_km))
+    # Warm the geocode cache so the first filtered request is fast.
+    if plz and radius_km > 0:
+        geocode(plz)
+    return jsonify({'ok': True, 'plz': plz, 'radius_km': radius_km})
 
 
 @app.route('/api/scrape', methods=['POST'])
@@ -786,7 +912,9 @@ def image_proxy():
 
 @app.route('/api/top-deals')
 def api_top_deals():
-    return jsonify(db.get_top_deal_per_group())
+    deals = db.get_top_deal_per_group()
+    plz, radius_km = _read_plz_radius_args()
+    return jsonify(_apply_plz_radius_filter(deals, plz, radius_km))
 
 
 @app.route('/api/export/csv')
@@ -820,6 +948,7 @@ def _load_persisted_interval():
 # Background auction-refresh starts as soon as the app module is imported
 # (i.e. from main.py too) — daemon thread dies with the process.
 _start_auction_refresh()
+_start_geocode_thread()
 
 
 if __name__ == '__main__':

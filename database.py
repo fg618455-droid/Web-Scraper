@@ -83,6 +83,17 @@ def _create_schema(c):
         PRIMARY KEY (group_name, source)
     )''')
 
+    # Geocoding cache: maps a location string ("80331 München", "10115 Berlin")
+    # to lat/lon. status='ok' = resolved, status='notfound' = Nominatim returned
+    # nothing (negative cache, retry after a week).
+    c.execute('''CREATE TABLE IF NOT EXISTS geocache (
+        query       TEXT PRIMARY KEY,
+        lat         REAL,
+        lon         REAL,
+        status      TEXT NOT NULL DEFAULT 'ok',
+        fetched_at  TEXT NOT NULL
+    )''')
+
 
 def _run_migrations(c):
     """Add columns that may be missing in older DBs."""
@@ -97,6 +108,10 @@ def _run_migrations(c):
         ('blocked',          'INTEGER DEFAULT 0'),
         ('bid_count',        'INTEGER'),
         ('auction_ends_at',  'TEXT'),
+        # PLZ radius filter (Iter. 24): geocoded coords for deals with a location.
+        # Backfilled lazily by the background geocode thread in app.py.
+        ('lat',              'REAL'),
+        ('lon',              'REAL'),
     ]:
         try:
             c.execute(f'ALTER TABLE deals ADD COLUMN {col} {typedef}')
@@ -663,6 +678,81 @@ def log_alert(alert_id, deal_id, price):
     )
     conn.commit()
     conn.close()
+
+
+# ── Geocode cache + deal coord helpers (Iter. 24 PLZ filter) ────────────────
+
+def geocache_lookup(query: str):
+    """Return (lat, lon, status) or None if query never resolved.
+    status='notfound' rows older than 7 days are treated as expired (None)."""
+    conn = get_connection()
+    row = conn.execute(
+        'SELECT lat, lon, status, fetched_at FROM geocache WHERE query = ?',
+        (query,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    if row['status'] == 'notfound':
+        try:
+            age_days = (datetime.now() - datetime.fromisoformat(row['fetched_at'])).days
+        except Exception:
+            age_days = 999
+        if age_days >= 7:
+            return None
+    return (row['lat'], row['lon'], row['status'])
+
+
+def geocache_store(query: str, lat: float | None, lon: float | None, status: str = 'ok'):
+    conn = get_connection()
+    conn.execute(
+        'INSERT INTO geocache (query, lat, lon, status, fetched_at) '
+        'VALUES (?, ?, ?, ?, ?) '
+        'ON CONFLICT(query) DO UPDATE SET '
+        '  lat=excluded.lat, lon=excluded.lon, '
+        '  status=excluded.status, fetched_at=excluded.fetched_at',
+        (query, lat, lon, status, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def backfill_deal_coords_from_cache() -> int:
+    """Copy lat/lon from the geocache into deals for every matching location.
+    Cheap (pure SQL) — call this before queueing Nominatim requests so we
+    don't waste rate-limit slots on locations another deal already resolved.
+    Returns number of rows updated."""
+    conn = get_connection()
+    cur = conn.execute(
+        'UPDATE deals SET '
+        '  lat = (SELECT lat FROM geocache WHERE query = deals.location AND status = "ok"), '
+        '  lon = (SELECT lon FROM geocache WHERE query = deals.location AND status = "ok") '
+        'WHERE deals.location IS NOT NULL AND deals.lat IS NULL '
+        '  AND EXISTS (SELECT 1 FROM geocache WHERE query = deals.location AND status = "ok")'
+    )
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
+def get_distinct_locations_needing_geocode(limit: int = 50) -> list[str]:
+    """Return distinct location strings that need a fresh Nominatim call:
+    appear in deals, no lat yet, not in geocache (or in cache as expired
+    'notfound'). DISTINCT avoids 50 deals × same Berlin postcode = 50 calls."""
+    conn = get_connection()
+    rows = conn.execute(
+        'SELECT DISTINCT d.location FROM deals d '
+        'LEFT JOIN geocache g ON g.query = d.location '
+        'WHERE d.location IS NOT NULL AND TRIM(d.location) != "" '
+        '  AND d.lat IS NULL '
+        '  AND (g.query IS NULL OR '
+        '       (g.status = "notfound" AND julianday("now") - julianday(g.fetched_at) > 7)) '
+        'LIMIT ?',
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [r['location'] for r in rows]
 
 
 def get_alert_log():
