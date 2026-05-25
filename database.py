@@ -120,6 +120,16 @@ def _run_migrations(c):
         # Combined with existing pickup_only this gives a tri-state badge:
         # "Nur Abholung", "Versand", "Beides", or nothing if both unknown.
         ('shipping_available', 'INTEGER'),
+        # Iter. 27 D13: Zeitstempel des letzten Bid-History-Imports. Wird von
+        # replace_price_history() gesetzt und vom Modal als "Eingespielt: vor
+        # 12 min" angezeigt damit Felix sieht ob die Chart-Daten noch frisch
+        # sind oder ob nach dem Paste schon wieder Gebote gefallen sind.
+        ('bid_history_imported_at', 'TEXT'),
+        # Iter. 27 D14: Karten-Preis zum Zeitpunkt des letzten Imports. Wenn
+        # spaeter ein Scrape einen hoeheren Preis liefert, koennen wir das
+        # ehrlich als "veraltet" markieren ohne die echte Karten-Preis-Spalte
+        # zu manipulieren.
+        ('bid_history_imported_price', 'REAL'),
     ]:
         try:
             c.execute(f'ALTER TABLE deals ADD COLUMN {col} {typedef}')
@@ -596,7 +606,11 @@ def mark_expired_auctions() -> int:
     """
     conn = get_connection()
     c = conn.cursor()
-    now_iso = datetime.utcnow().isoformat()
+    # Iter. 27: war datetime.utcnow() — falsch, weil auction_ends_at als
+    # Berlin-Local-ISO gespeichert ist (scraper._parse_auction_remaining /
+    # _parse_ebay_item_end_time). UTC-Vergleich retired Auktionen 1-2h zu
+    # spaet.  Wir muessen Local-now mit Local-end vergleichen.
+    now_iso = datetime.now().isoformat()
     c.execute(
         '''UPDATE deals
            SET available = 0
@@ -884,6 +898,10 @@ def replace_price_history(deal_id: int, bids: list[dict]) -> int:
     Caller is responsible for only invoking this when bids is non-empty
     (we don't want to wipe our snapshots if the bid-history fetch failed).
     Returns the number of rows inserted.
+
+    Iter. 27 D13/D14: Setzt zusaetzlich bid_history_imported_at + _price
+    auf der zugehoerigen deals-Row damit die UI Frischheit anzeigen + spaetere
+    Karten-Preis-Sprünge als „stale" erkennen kann.
     """
     if not bids:
         return 0
@@ -900,6 +918,15 @@ def replace_price_history(deal_id: int, bids: list[dict]) -> int:
         '''INSERT INTO price_history
            (deal_id, price, changed_at, bidder, source) VALUES (?, ?, ?, ?, ?)''',
         rows,
+    )
+    # Frischheits-Stempel + hoechster importierter Bid als Baseline.
+    max_price = max(b['price'] for b in bids if b.get('price') is not None)
+    c.execute(
+        '''UPDATE deals
+           SET bid_history_imported_at    = ?,
+               bid_history_imported_price = ?
+           WHERE id = ?''',
+        (datetime.now().isoformat(), max_price, deal_id),
     )
     conn.commit()
     conn.close()

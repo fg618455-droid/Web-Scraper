@@ -798,8 +798,15 @@ def parse_ebay_bid_history(raw: str) -> list[dict]:
 # Module-level cache: when eBay's anti-bot wall has been seen recently we
 # stop hammering /bfl/viewbids/. Resets after _EBAY_BLOCK_COOLDOWN_SEC so
 # we'll automatically recover once the IP gets unbanned.
-_EBAY_BLOCKED_UNTIL: float = 0.0
-_EBAY_BLOCK_COOLDOWN_SEC = 30 * 60   # 30 min — matches the auction-refresh tick
+#
+# Iter. 27 C10: Zwei getrennte Cooldowns — der unauthenticated 30-min-Block
+# darf den authentifizierten Pfad NICHT killen. Wenn ein User in der
+# Zwischenzeit per "eBay-Login" einloggt, soll die Login-Session sofort
+# probiert werden duerfen (haerterer Akamai-Block setzt eigenen 10-min-TTL).
+_EBAY_BLOCKED_UNTIL: float = 0.0          # plain-requests-Pfad
+_EBAY_AUTH_BLOCKED_UNTIL: float = 0.0     # PW + login-session-Pfad
+_EBAY_BLOCK_COOLDOWN_SEC      = 30 * 60   # 30 min — matches the auction-refresh tick
+_EBAY_AUTH_BLOCK_COOLDOWN_SEC = 10 * 60   # 10 min — kuerzer weil Auth-Pfad teurer ist
 
 
 def _ebay_response_is_blocked(html: str) -> bool:
@@ -809,6 +816,67 @@ def _ebay_response_is_blocked(html: str) -> bool:
         return False
     lo = html.lower()
     return any(m in lo for m in _BOT_CHALLENGE_MARKERS) or 'splashui' in lo
+
+
+def _parse_ebay_inline_bids(html: str) -> list[dict]:
+    """Iter. 27 C11: Mancne eBay-Item-Pages embedden Bid-Snippets als JSON in
+    inline-scripts (raptor.config / viewItemRequestModel / bidHistoryModel).
+    Wir versuchen die rauszuziehen wenn /bfl/viewbids/ blockiert ist.
+
+    Erwartetes Format pro Bid (mehrere Varianten beobachtet):
+      {"bidder": "x***y", "amount": "23,50 EUR", "time": "2026-05-25T17:35:00"}
+      {"bidderUserName": "x***y", "bidAmount": {"value": 23.5}, "bidTime": 173...}
+    Wir akzeptieren beides und mappen auf unser Standard-Schema.
+    """
+    if not html:
+        return []
+    import json as _json
+
+    bids: list[dict] = []
+
+    # Suche nach JSON-Bloecken die wie Bid-Listen aussehen
+    candidates = re.findall(
+        r'(?:bidHistory|bidEvents|bids)["\']?\s*:\s*(\[[^\[\]]{0,30000}\])',
+        html, re.IGNORECASE | re.DOTALL,
+    )
+    for raw in candidates:
+        try:
+            arr = _json.loads(raw)
+        except _json.JSONDecodeError:
+            continue
+        if not isinstance(arr, list):
+            continue
+        for entry in arr:
+            if not isinstance(entry, dict):
+                continue
+            # Amount-Extraktion
+            amt = entry.get('bidAmount') or entry.get('amount') or entry.get('price')
+            if isinstance(amt, dict):
+                amt = amt.get('value') or amt.get('amount')
+            price = None
+            if amt is not None:
+                price = _parse_price(str(amt))
+            if price is None or price < 0.01:
+                continue
+            # Zeit-Extraktion (entweder ISO-String oder Unix-ms)
+            tval = entry.get('bidTime') or entry.get('time') or entry.get('timestamp')
+            ts_iso: str | None = None
+            if isinstance(tval, (int, float)) and tval > 1_000_000_000:
+                try:
+                    ms = int(tval) if tval > 1e12 else int(tval * 1000)
+                    ts_iso = datetime.fromtimestamp(ms / 1000.0).isoformat(timespec='seconds')
+                except (ValueError, OSError):
+                    pass
+            elif isinstance(tval, str):
+                ts_iso = _parse_ebay_bid_time(tval) or tval[:19] if 'T' in tval else None
+            if not ts_iso:
+                continue
+            bidder = entry.get('bidderUserName') or entry.get('bidder')
+            bids.append({'price': price, 'changed_at': ts_iso, 'bidder': bidder})
+        if bids:
+            break  # erste passende Bid-Liste reicht
+
+    return _sort_and_dedupe_bids(bids) if bids else []
 
 
 def scrape_ebay_bid_history(item_url: str) -> list[dict]:
@@ -828,31 +896,13 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
       [{'price': 2.85, 'changed_at': '2026-05-15T18:56:45', 'bidder': '9***d'}, ...]
     Empty list on any failure — caller falls back to its own snapshot history.
     """
-    global _EBAY_BLOCKED_UNTIL
+    global _EBAY_BLOCKED_UNTIL, _EBAY_AUTH_BLOCKED_UNTIL
 
     item_id = _ebay_item_id(item_url)
     if not item_id:
         return []
 
-    # ── Cooldown gate ─────────────────────────────────────────────────────
-    # When eBay's IP-ban is active, all requests are wasted Akamai roundtrips
-    # — skip until the cooldown expires.
-    now = time.time()
-    if now < _EBAY_BLOCKED_UNTIL:
-        logger.debug(
-            'bid-history skipped for %s — eBay block cooldown active for %.0f more seconds',
-            item_id, _EBAY_BLOCKED_UNTIL - now,
-        )
-        return []
-
-    from urllib.parse import urlparse
-    p = urlparse(item_url)
-    host  = p.netloc or 'www.ebay.de'
-    proto = p.scheme or 'https'
-    url = f'{proto}://{host}/bfl/viewbids/{item_id}?item={item_id}&rt=nc'
-
-    html = ''
-
+    # ── Iter. 27 C10: Cooldown gate, ausdifferenziert auth/unauth ─────────
     # If the user has saved a login session, skip plain requests entirely —
     # eBay blocks unauthenticated GETs to /bfl/viewbids/ with an Akamai-page
     # that would set the cooldown and starve the authenticated Playwright
@@ -863,6 +913,30 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
         have_login_session = _ebay_has_session()
     except Exception:
         pass
+
+    now = time.time()
+    if have_login_session:
+        if now < _EBAY_AUTH_BLOCKED_UNTIL:
+            logger.debug(
+                'bid-history skipped for %s — eBay AUTH block cooldown active for %.0f more seconds',
+                item_id, _EBAY_AUTH_BLOCKED_UNTIL - now,
+            )
+            return []
+    else:
+        if now < _EBAY_BLOCKED_UNTIL:
+            logger.debug(
+                'bid-history skipped for %s — eBay block cooldown active for %.0f more seconds',
+                item_id, _EBAY_BLOCKED_UNTIL - now,
+            )
+            return []
+
+    from urllib.parse import urlparse
+    p = urlparse(item_url)
+    host  = p.netloc or 'www.ebay.de'
+    proto = p.scheme or 'https'
+    url = f'{proto}://{host}/bfl/viewbids/{item_id}?item={item_id}&rt=nc'
+
+    html = ''
 
     # ── Attempt 1: plain requests (fast) — skipped when logged in ─────────
     if not have_login_session:
@@ -906,17 +980,33 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
 
     try:
         with sync_playwright() as pw:
-            # Note (Iter. 26): even headless=False + stealth + a valid
-            # storage_state did NOT bypass eBay's Akamai 'splashui/captcha'
-            # block-page in testing. Keeping headless=True here because the
-            # heavy variant added a 5-10s window-spawn cost per call and was
-            # equally blocked. The manual paste flow (/api/deals/<id>/bid-
-            # history/import) remains the reliable path for bid-history.
+            # Iter. 27 C9: PW-Pfad bekommt jetzt die gleichen Stealth-Patches +
+            # Header die scrape_anti_bot_batch verwendet. Im Iter. 26 war hier
+            # nur naked Playwright + storage_state — Akamai erkannte das
+            # leicht (navigator.webdriver=true, kein Sec-Ch-Ua usw.). Mit dem
+            # vollen Stealth-Profil haben wir eine echte Chance auch bei
+            # /bfl/viewbids/ durchzukommen, besonders zusammen mit der
+            # Login-Session.
             browser = pw.chromium.launch(headless=True, args=['--no-sandbox'])
             ctx_kwargs = dict(
                 user_agent=_BIG_SHOP_HEADERS.get('User-Agent', ''),
                 locale='de-DE',
                 timezone_id='Europe/Berlin',
+                viewport={'width': 1366, 'height': 768},
+                screen={'width': 1920, 'height': 1080},
+                color_scheme='light',
+                extra_http_headers={
+                    'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"Windows"',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Upgrade-Insecure-Requests': '1',
+                },
             )
             # If the user logged in via the "eBay-Login"-button (Iter. 25),
             # inject the saved cookies so /bfl/viewbids/ returns the bid
@@ -930,7 +1020,16 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
             except Exception:
                 pass
             ctx = browser.new_context(**ctx_kwargs)
+            ctx.add_init_script(_PW_STEALTH_JS)
             page = ctx.new_page()
+            # Iter. 27 C9: Warmup-GET auf die eBay-Homepage damit Akamai uns
+            # erstmal als "echter Browser" sieht bevor wir auf /bfl/viewbids/
+            # gehen. Spart manchmal den Splash-Page-Hit.
+            try:
+                page.goto(f'{proto}://{host}/', wait_until='domcontentloaded', timeout=10_000)
+                page.wait_for_timeout(800)
+            except Exception:
+                pass
             page.goto(url, wait_until='domcontentloaded', timeout=20_000)
             # Wait for table content to render
             try:
@@ -949,20 +1048,149 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
 
     # Same block-detect on the PW response so the cooldown also engages
     # when eBay shows the splash-UI page (which Playwright happily renders).
+    # Iter. 27 C10: Wenn Login-Session aktiv war, nutzen wir den AUTH-Cooldown
+    # (kuerzer, 10 min) — andernfalls den langen unauth-Cooldown.
     if _ebay_response_is_blocked(html):
-        _EBAY_BLOCKED_UNTIL = time.time() + _EBAY_BLOCK_COOLDOWN_SEC
+        if have_login_session:
+            _EBAY_AUTH_BLOCKED_UNTIL = time.time() + _EBAY_AUTH_BLOCK_COOLDOWN_SEC
+            cooldown_min = _EBAY_AUTH_BLOCK_COOLDOWN_SEC // 60
+            pfad = 'AUTH'
+        else:
+            _EBAY_BLOCKED_UNTIL = time.time() + _EBAY_BLOCK_COOLDOWN_SEC
+            cooldown_min = _EBAY_BLOCK_COOLDOWN_SEC // 60
+            pfad = 'UNAUTH'
         _save_debug_html('bid_history', item_id, html)
         logger.warning(
-            'bid-history (PW): eBay block page detected — cooldown enabled for %d min',
-            _EBAY_BLOCK_COOLDOWN_SEC // 60,
+            'bid-history (PW %s): eBay block page detected — cooldown enabled for %d min',
+            pfad, cooldown_min,
         )
         return []
 
     bids = parse_ebay_bid_history(html) if html else []
-    if not bids and html:
+    if bids:
+        logger.info(f'bid-history for {item_id}: {len(bids)} bids parsed (playwright)')
+        return bids
+
+    # Iter. 27 C11: Fallback — Item-Page-eingebettetes JSON. Manche eBay-
+    # Item-Detail-Pages haben bidHistory-Arrays in inline-Scripts; nicht so
+    # vollstaendig wie /bfl/viewbids/ aber besser als leeres Array wenn
+    # Akamai die viewbids-Seite blockt.
+    try:
+        import requests as _rq
+        sess = _rq.Session()
+        sess.headers.update(_BIG_SHOP_HEADERS)
+        sess.get(f'{proto}://{host}/', timeout=10)
+        r2 = sess.get(item_url, timeout=15)
+        if r2.status_code == 200 and not _ebay_response_is_blocked(r2.text):
+            inline_bids = _parse_ebay_inline_bids(r2.text)
+            if inline_bids:
+                logger.info(
+                    'bid-history for %s: %d bids parsed from item-page inline JSON (C11 fallback)',
+                    item_id, len(inline_bids),
+                )
+                return inline_bids
+    except Exception as e:
+        logger.debug('bid-history C11 fallback failed for %s: %s', item_id, e)
+
+    if html:
         _save_debug_html('bid_history', item_id, html)
-    logger.info(f'bid-history for {item_id}: {len(bids)} bids parsed (playwright)')
+    logger.info(f'bid-history for {item_id}: 0 bids parsed (playwright + C11)')
     return bids
+
+
+# Iter. 27 B6: Endzeit-Parsing fuer eBay-Item-Page. Suchergebnis liefert nur
+# relative Countdown-Strings ("Noch 2h 14m"), die Item-Page hat oft
+# (a) data-Attribute (data-tm-itemEndTimeStamp) mit Unix-ms, oder
+# (b) Microdata <meta itemprop="availabilityEnds"> mit ISO,
+# (c) JavaScript-Variable raptor.config.itemEndTime mit Unix-ms,
+# (d) sichtbarer Text "Endet in 2 Std 14 Min" / "Endet am 25. Mai, 17:35".
+# Wir versuchen alle Strategien der Reihe nach.
+_ITEM_END_ABS_RE = re.compile(
+    r'[Ee]ndet\s+(?:am\s+)?(\d{1,2})\.?\s+([A-Za-zäöüÄÖÜ]+)\.?\s*'
+    r'(?:(\d{4}),?\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?',
+)
+_ITEM_END_UNIX_RE = re.compile(
+    r'(?:itemEndDate|itemEndTime|endTimeMs|endDate|endTime)\D*?(\d{13})'
+)
+
+
+def _parse_ebay_item_end_time(soup, html: str) -> str | None:
+    """Best-effort end-time parsing for an eBay item page. Returns ISO-8601
+    (Berlin local, no TZ tag — matches our other timestamps) or None."""
+    from datetime import timedelta
+
+    # (a) JavaScript-Variable in inline-script — eBay embeds endTime as ms
+    m = _ITEM_END_UNIX_RE.search(html)
+    if m:
+        try:
+            ts_ms = int(m.group(1))
+            dt = datetime.fromtimestamp(ts_ms / 1000.0)
+            # Sanity: in the future (skip stale listings whose page mentions a
+            # past end-time) and within 90 days (skip junk matches like
+            # creation timestamps).
+            now = datetime.now()
+            if dt > now and (dt - now).total_seconds() < 90 * 86400:
+                return dt.isoformat(timespec='minutes')
+        except (ValueError, OSError):
+            pass
+
+    # (b) Microdata <meta itemprop="availabilityEnds" content="...">
+    meta = soup.select_one('meta[itemprop="availabilityEnds"], '
+                           'meta[itemprop="priceValidUntil"]')
+    if meta and meta.get('content'):
+        try:
+            txt = str(meta['content']).strip().replace('Z', '')
+            dt = datetime.fromisoformat(txt)
+            if dt > datetime.now():
+                return dt.isoformat(timespec='minutes')
+        except ValueError:
+            pass
+
+    # (c) data-Attribute am Countdown-Element
+    el = soup.select_one('[data-tm-itemendtimestamp], [data-end-time], '
+                         '[data-endtime], [data-end-time-stamp]')
+    if el:
+        for attr in ('data-tm-itemendtimestamp', 'data-end-time',
+                     'data-endtime', 'data-end-time-stamp'):
+            raw = el.get(attr)
+            if not raw:
+                continue
+            try:
+                ts_ms = int(raw)
+                dt = datetime.fromtimestamp(ts_ms / 1000.0)
+                if dt > datetime.now():
+                    return dt.isoformat(timespec='minutes')
+            except (ValueError, OSError):
+                continue
+
+    # (d) Sichtbarer Text — relative ("Endet in 2 Std 14 Min") wieder via
+    # _EBAY_REMAIN_RE, absolute ("Endet am 25. Mai 17:35") via lokalem Regex
+    text = soup.get_text(' ', strip=True)[:8000]   # cap to avoid huge regex passes
+
+    # relativ
+    rem = _parse_auction_remaining(text)
+    if rem:
+        return rem
+
+    # absolut
+    m = _ITEM_END_ABS_RE.search(text)
+    if m:
+        day, mon_raw, year, hr, mn, sc = m.groups()
+        mon = _DE_BID_MONTHS.get(mon_raw.lower()[:4]) or _DE_BID_MONTHS.get(mon_raw.lower()[:3])
+        if mon:
+            try:
+                yr = int(year) if year else datetime.now().year
+                dt = datetime(yr, mon, int(day), int(hr), int(mn), int(sc or 0))
+                # Year rollover for Dec->Jan boundary listings — only if more
+                # than 30 days in the past.
+                if (datetime.now() - dt).total_seconds() > 30 * 86400:
+                    dt = dt.replace(year=yr + 1)
+                if dt > datetime.now():
+                    return dt.isoformat(timespec='minutes')
+            except ValueError:
+                pass
+
+    return None
 
 
 def refresh_ebay_item(url: str) -> dict | None:
@@ -1038,6 +1266,16 @@ def refresh_ebay_item(url: str) -> dict | None:
         # can't tell, leave it alone — the caller preserves the original value
         # (so 'auction' isn't accidentally clobbered with 'fixed').
         out['listing_type'] = 'auction'
+
+    # ── Iter. 27 B6: Auktions-Endzeit von der Item-Detail-Seite ──────────
+    # Im Such-Result haben wir nur den relativen Countdown ("Noch 2h 14m"),
+    # auf der Item-Page steht oft das absolute Datum als data-Attribut oder
+    # Microdata. Wenn nichts absolutes da ist, parsen wir den relativen
+    # Countdown der Item-Page (genauer als Such-Result weil eBay diesen
+    # dort live aktualisiert).
+    ends_iso = _parse_ebay_item_end_time(soup, r.text)
+    if ends_iso:
+        out['auction_ends_at'] = ends_iso
 
     # ── Auction ended detection ───────────────────────────────────────────
     # eBay shows specific copy when a listing is closed. If any of these

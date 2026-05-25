@@ -720,17 +720,26 @@ function auctionInlineHtml(d) {
     bidHtml = `<span class="auction-meta-unknown">${icon('gavel')} Gebote …</span>`;
   }
   const remaining = formatRemaining(d.auction_ends_at);
+  const absEnd    = formatAbsoluteEnd(d.auction_ends_at);
   // eBay doesn't expose end-time in the search listing — only show countdown
   // when we actually have it. Otherwise show a neutral "läuft" marker so the
-  // user doesn't get a misleading "beendet".
+  // user doesn't get a misleading "beendet".  Iter. 27 B8: zusatzlich
+  // absolute Endzeit als Hover-Tooltip damit Felix die genaue Uhrzeit sieht
+  // ohne erst das Modal oeffnen zu muessen.
   const remHtml = remaining
-    ? `<span>${icon('clock')} ${esc(remaining)}</span>`
+    ? `<span title="${absEnd ? esc('Endet ' + absEnd) : ''}">${icon('clock')} ${esc(remaining)}</span>`
     : `<span class="auction-meta-running">${icon('clock')} läuft</span>`;
   const seller = d.seller
     ? `<span class="auction-meta-seller" title="${esc(d.seller)}">@${esc(d.seller).slice(0, 18)}</span>`
     : '';
+  // Iter. 27 E16: deal-Preis + last_seen als data-Attrs damit hydrateSparklines
+  // einen Shadow-Endpunkt anhaengen kann wenn die Bid-History aelter ist als
+  // der Karten-Preis. So endet die Sparkline immer beim sichtbaren Karten-
+  // Preis statt 'unter' ihm.
+  const dataAttrs = `data-deal-price="${d.price != null ? d.price : ''}"`
+                  + ` data-deal-lastseen="${d.last_seen || ''}"`;
   return `
-<div class="auction-spark-wrap"
+<div class="auction-spark-wrap" ${dataAttrs}
      onclick="event.stopPropagation();event.preventDefault();openAuctionModal(${d.id})"
      title="Preisübersicht öffnen">
   <span class="auction-spark-label">${icon('trend')} Preisübersicht</span>
@@ -753,6 +762,28 @@ function formatRemaining(iso) {
   if (days > 0) return `${days}d ${hrs}h`;
   if (hrs  > 0) return `${hrs}h ${mins}m`;
   return `${mins}m`;
+}
+
+/* Iter. 27 B8: Absolute Endzeit als "heute 17:35" oder "Mi 17:35" oder
+   "25.05. 17:35" (je nach Naehe). Zusatz zum relativen Countdown damit
+   Felix auch bei kurzen Auktionen direkt sieht WANN sie endet. */
+function formatAbsoluteEnd(iso) {
+  if (!iso) return null;
+  const end  = new Date(iso);
+  const ms   = end.getTime() - Date.now();
+  if (ms <= 0) return null;
+  const hhmm = end.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const endDay = new Date(end); endDay.setHours(0, 0, 0, 0);
+  const dayDelta = Math.round((endDay - today) / 86_400_000);
+  if (dayDelta === 0) return `heute ${hhmm}`;
+  if (dayDelta === 1) return `morgen ${hhmm}`;
+  if (dayDelta <= 6) {
+    const wd = end.toLocaleDateString('de-DE', { weekday: 'short' });
+    return `${wd} ${hhmm}`;
+  }
+  const dm = end.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+  return `${dm} ${hhmm}`;
 }
 
 /* Time delta from `tMs` to now, in human-readable German.
@@ -1603,12 +1634,33 @@ async function openAuctionModal(dealId) {
     if (!d || d.error) { titleEl.textContent = 'Angebot nicht gefunden'; return; }
     titleEl.textContent = d.title;
     link.href = d.url;
+
+    // Iter. 27 D12: Direkt-Link zur eBay-Gebotsuebersicht. Reduziert die
+    // Reibung des Paste-Flows: Klick → Tab geht auf der Bid-History-Seite
+    // auf, Felix markiert Tabelle, kopiert, klickt zurueck "Gebote einfuegen".
+    const viewBidsBtn = document.getElementById('auction-modal-viewbids');
+    if (viewBidsBtn) {
+      const idMatch = d.url ? d.url.match(/\/itm\/(?:[^/?#]*-)?(\d{9,15})|[?&]item=(\d{9,15})/) : null;
+      const itemId = idMatch ? (idMatch[1] || idMatch[2]) : null;
+      if (itemId) {
+        const host = (d.url.match(/^https?:\/\/[^/]+/) || ['https://www.ebay.de'])[0];
+        viewBidsBtn.href = `${host}/bfl/viewbids/${itemId}?item=${itemId}&rt=nc`;
+        viewBidsBtn.style.display = '';
+      } else {
+        viewBidsBtn.style.display = 'none';
+      }
+    }
     const hasBidHistory = historyRows.some(r => r.source === 'ebay_bid');
     const rowLabel = hasBidHistory ? 'Gebote' : 'Snapshots';
 
     // Build meta cards. eBay doesn't expose end-time in the search listing
     // so we show "läuft" instead of pretending to know.
     const remaining = formatRemaining(d.auction_ends_at);
+    const absoluteEnd = formatAbsoluteEnd(d.auction_ends_at);
+    // Iter. 27 B8: Wenn wir das absolute Ende kennen, zeigen wir BEIDES:
+    // grosser Countdown + kleinere absolute Zeit darunter ("Noch 2h 14m /
+    // heute 17:35"). Macht klar wann die Auktion endet, ohne dass Felix
+    // rechnen muss.
     const endsLabel = remaining ?? 'läuft';
     meta.innerHTML = `
       <div class="auction-meta-card">
@@ -1629,6 +1681,7 @@ async function openAuctionModal(dealId) {
       <div class="auction-meta-card">
         <div class="auction-meta-card-label">Endet</div>
         <div class="auction-meta-card-value">${esc(endsLabel)}</div>
+        ${absoluteEnd ? `<div class="auction-meta-card-sub">${esc(absoluteEnd)}</div>` : ''}
       </div>
       <div class="auction-meta-card">
         <div class="auction-meta-card-label">${rowLabel}</div>
@@ -1649,17 +1702,40 @@ async function openAuctionModal(dealId) {
         }</div>
       </div>`;
 
-    // Hint when there are more bids on eBay than snapshots we captured
+    // Hint-Banner-Logik (Iter. 27 A5 erweitert)
+    //   stale   = Bid-History importiert, aber Karten-Preis ist NEUER (Felix
+    //             muss neu einfuegen, sonst stimmt Chart und Karte nicht)
+    //   success = Bid-History importiert + konsistent mit Karten-Preis
+    //   warning = keine Bid-History, eBay zeigt mehr Gebote als wir Snapshots haben
+    //   hidden  = nichts auffaelliges
     const hint = document.getElementById('auction-modal-hint');
-    if (!hasBidHistory && d.bid_count != null && d.bid_count > historyRows.length) {
+    const maxBidPrice = hasBidHistory
+      ? Math.max(...historyRows.filter(r => r.source === 'ebay_bid').map(r => r.price))
+      : null;
+    const isStale = hasBidHistory && d.price != null && maxBidPrice != null
+                  && d.price > maxBidPrice + 0.01;
+
+    if (isStale) {
+      const diff = (d.price - maxBidPrice).toFixed(2).replace('.', ',');
+      hint.innerHTML = `${icon('alert')}
+        <span>Karten-Preis <b>${d.price.toLocaleString('de-DE')} €</b> ist neuer als das letzte importierte Gebot (<b>${maxBidPrice.toLocaleString('de-DE')} €</b>, Differenz +${diff} €).
+        Auf eBay sind seit dem letzten Import neue Gebote gefallen — Tabelle neu kopieren und <b>„Gebote einfügen"</b> klicken.</span>`;
+      hint.dataset.mode = 'warning';
+      hint.classList.remove('hidden');
+    } else if (!hasBidHistory && d.bid_count != null && d.bid_count > historyRows.length) {
       hint.innerHTML = `${icon('alert')}
         <span>eBay zeigt <b>${d.bid_count} Gebote</b>, hier liegen aber nur <b>${historyRows.length}</b> Scrape-Snapshots.
         Öffne bei eBay die Gebotsübersicht, kopiere die Tabelle und nutze <b>„Gebote einfügen"</b>.</span>`;
       hint.dataset.mode = 'warning';
       hint.classList.remove('hidden');
     } else if (hasBidHistory) {
+      // Iter. 27 D13: zeige zusaetzlich wann der Import passierte.
+      const importedAt = d.bid_history_imported_at
+        ? formatRelative(new Date(d.bid_history_imported_at).getTime())
+        : null;
+      const sub = importedAt ? ` <span class="dim">· eingespielt ${esc(importedAt)}</span>` : '';
       hint.innerHTML = `${icon('check')}
-        <span>Echte eBay-Gebotsübersicht importiert: Beträge und Uhrzeiten kommen aus der eBay-Tabelle.</span>`;
+        <span>Echte eBay-Gebotsübersicht importiert: Beträge und Uhrzeiten kommen aus der eBay-Tabelle.${sub}</span>`;
       hint.dataset.mode = 'success';
       hint.classList.remove('hidden');
     } else {
@@ -1691,20 +1767,42 @@ async function openAuctionModal(dealId) {
       bidder: r.bidder || null,
       source: r.source || 'snapshot',
     }));
-    // For fallback snapshots: append a synthetic "jetzt" point so the chart
-    // always shows at least a line (not just text) and the visible time-axis
-    // extends to now. Skipped for imported eBay bids (authoritative timeline).
-    // Synthetic flag is used by the table renderer to label this row as
-    // "jetzt (live)" instead of pretending it was a recorded snapshot.
+    // Iter. 27 A1: For fallback snapshots we used to append a synthetic point
+    // stamped with Date.now() and labeled "jetzt (live)". That was a lie: when
+    // the last scrape ran 4 h ago, the price shown was 4 h old, not live. Now
+    // we stamp the appended point with d.last_seen (when the scrape actually
+    // confirmed the price) and label the row "zuletzt erfasst" so the user
+    // knows the freshness of that value. Still skipped for imported eBay bids
+    // because the bid timeline is already authoritative.
     if (!hasBidHistory && d.price != null) {
+      const lastSeenMs = d.last_seen ? new Date(d.last_seen).getTime() : Date.now();
       const lastT = series.length ? series[series.length - 1].t : 0;
-      const nowMs = Date.now();
-      if (nowMs - lastT > 30_000) {  // skip if a snapshot is already from the last 30s
-        series.push({ t: nowMs, p: d.price, synthetic: true });
+      if (lastSeenMs - lastT > 30_000) {
+        series.push({ t: lastSeenMs, p: d.price, synthetic: true });
       }
     }
-    const chartSeries = hasBidHistory ? buildAuctionProgressSeries(series) : series;
-    chart.innerHTML = renderAuctionChart(chartSeries);
+    let chartSeries = hasBidHistory ? buildAuctionProgressSeries(series) : series;
+
+    // Iter. 27 A4: Wenn die importierte Bid-History aelter ist als der aktuelle
+    // Suchergebnis-Preis (typisch: Scrape lief NACH dem Bid-History-Paste, eBay
+    // hat ein neueres Gebot, das wir nicht in der Tabelle haben), zeigen wir
+    // einen explizit gestrichelten "Suche"-Punkt am Karten-Preis. Visuell
+    // klar abgegrenzt von echten Geboten, damit Felix sieht: "hier liegt der
+    // aktuelle Stand laut Suche, die Bid-History endet aber weiter unten."
+    if (hasBidHistory && chartSeries.length && d.price != null) {
+      const lastPoint = chartSeries[chartSeries.length - 1];
+      if (d.price > lastPoint.p + 0.01) {
+        const lastSeenMs = d.last_seen ? new Date(d.last_seen).getTime() : Date.now();
+        chartSeries = [...chartSeries, {
+          t: Math.max(lastSeenMs, lastPoint.t + 1),
+          p: d.price,
+          shadow: true,
+        }];
+      }
+    }
+
+    const endsMs = d.auction_ends_at ? new Date(d.auction_ends_at).getTime() : null;
+    chart.innerHTML = renderAuctionChart(chartSeries, { endsMs });  // SVG, kein User-Input
 
     // History table — 4-digit year, no ambiguity (DD.MM.YYYY HH:MM).
     if (series.length) {
@@ -1714,7 +1812,7 @@ async function openAuctionModal(dealId) {
       });
       const rows = [...series].reverse().map(r => `
         <tr${r.synthetic ? ' class="snapshot-now"' : ''}>
-          <td>${fmt.format(new Date(r.t))}${r.synthetic ? ' <span class="dim text-xs">· jetzt (live)</span>' : ''}</td>
+          <td>${fmt.format(new Date(r.t))}${r.synthetic ? ' <span class="dim text-xs">· zuletzt erfasst</span>' : ''}</td>
           ${hasBidHistory ? `<td>${esc(r.bidder || '–')}</td>` : ''}
           <td class="price-cell">${r.p.toLocaleString('de-DE')} €</td>
         </tr>`).join('');
@@ -1856,6 +1954,16 @@ async function refreshAuctionDeal(btn) {
       toast(`Komplette Gebots-Historie geladen: ${bidsImported} Einträge`, 'success');
     } else {
       _emitRefreshToast(oldPrice, newPrice, oldBids, newBids);
+      // Iter. 27 D14: Wenn der Preis gestiegen ist UND wir frueher mal eine
+      // Bid-History importiert hatten, ist die Tabelle jetzt veraltet (das
+      // neue Gebot fehlt). Sanfter Hinweis im Toast statt stiller Inkonsistenz.
+      const importedPrice = res?.deal?.bid_history_imported_price;
+      if (res?.deal?.bid_history_imported_at && newPrice != null
+          && importedPrice != null && newPrice > importedPrice + 0.01) {
+        setTimeout(() => {
+          toast('Karten-Preis neuer als importierte Gebote — bei eBay Gebotsübersicht neu kopieren', 'warning');
+        }, 600);
+      }
     }
 
     if (lbl) lbl.textContent = 'Aktualisiert ✓';
@@ -1951,8 +2059,11 @@ function buildAuctionProgressSeries(rawSeries) {
 }
 
 /* Render an SVG line chart for the auction price history.
-   series: [{ t: ms, p: euros }] sorted ascending by t. */
-function renderAuctionChart(series) {
+   series: [{ t: ms, p: euros }] sorted ascending by t.
+   opts: { endsMs }  optional auction-end-timestamp; if provided and after
+                     the last data point, the x-axis extends to it and a red
+                     "Ende"-marker line is drawn (Iter. 27 A3). */
+function renderAuctionChart(series, opts = {}) {
   if (!series.length) {
     return '<div class="auction-chart-empty">Noch keine Daten — die Historie wächst bei jedem Scrape.</div>';
   }
@@ -1966,7 +2077,13 @@ function renderAuctionChart(series) {
     </div>`;
   }
   const W = 680, H = 220, pad = { l: 50, r: 16, t: 18, b: 30 };
-  const tMin = series[0].t, tMax = series[series.length - 1].t;
+  const tMin = series[0].t;
+  let tMax = series[series.length - 1].t;
+  // Iter. 27 A3: x-axis extends to auction-end so the gap between "last bid"
+  // and "auction closes" is visible. Otherwise the chart always ends at the
+  // last data point and Felix has no visual cue how much time is left.
+  const endsMs = opts.endsMs && opts.endsMs > tMin ? opts.endsMs : null;
+  if (endsMs && endsMs > tMax) tMax = endsMs;
   const tSpan = Math.max(1, tMax - tMin);
   const ps = series.map(s => s.p);
   const pMin = Math.min(...ps);
@@ -1980,9 +2097,22 @@ function renderAuctionChart(series) {
   const x = (t) => pad.l + ((t - tMin) / tSpan) * (W - pad.l - pad.r);
   const y = (p) => H - pad.b - ((p - yMin) / ySpan) * (H - pad.t - pad.b);
 
-  const pts = series.map(s => `${x(s.t).toFixed(1)},${y(s.p).toFixed(1)}`);
-  const path = `M ${pts.join(' L ')}`;
-  const area = `M ${pad.l},${H - pad.b} L ${pts.join(' L ')} L ${W - pad.r},${H - pad.b} Z`;
+  // Iter. 27 A2: Step-line statt diagonaler Verbindung. Bei Auktionen aendert
+  // sich der Preis nur bei echten Geboten, dazwischen ist er konstant. Eine
+  // diagonale Linie suggeriert kontinuierlichen Anstieg und macht Sampling-
+  // Snapshots traegerisch unsichtbar. Treppen-Profil (H-Move, dann V-Move)
+  // zeigt ehrlich an: "Preis blieb konstant bis zum naechsten Datenpunkt".
+  const pts = series.map(s => ({ x: x(s.t), y: y(s.p) }));
+  let path = `M ${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+  for (let i = 1; i < pts.length; i++) {
+    path += ` H ${pts[i].x.toFixed(1)} V ${pts[i].y.toFixed(1)}`;
+  }
+  // Area-Fill folgt dem gleichen Step-Profil bis zur Baseline.
+  let area = `M ${pad.l.toFixed(1)},${(H - pad.b).toFixed(1)} L ${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+  for (let i = 1; i < pts.length; i++) {
+    area += ` H ${pts[i].x.toFixed(1)} V ${pts[i].y.toFixed(1)}`;
+  }
+  area += ` L ${pts[pts.length - 1].x.toFixed(1)},${(H - pad.b).toFixed(1)} Z`;
 
   // Y axis: 4 horizontal gridlines
   let grid = '';
@@ -2017,11 +2147,28 @@ function renderAuctionChart(series) {
   // (which is the normal case for auctions between bids).
   const lastIdx = series.length - 1;
   const dots = series.map((s, i) => {
-    const isLast = i === lastIdx;
-    const r      = isLast ? 5.5 : 3.5;
-    const cls    = isLast ? 'price-point price-point-latest' : 'price-point';
-    return `<circle class="${cls}" cx="${x(s.t).toFixed(1)}" cy="${y(s.p).toFixed(1)}" r="${r}"/>`;
+    const isLast    = i === lastIdx;
+    const isShadow  = s.shadow === true;       // Iter. 27 A4: dashed "Suche"-Punkt
+    const r         = isLast ? 5.5 : 3.5;
+    const cls       = isShadow ? 'price-point price-point-shadow'
+                    : isLast   ? 'price-point price-point-latest'
+                    : 'price-point';
+    return `<circle class="${cls}" cx="${pts[i].x.toFixed(1)}" cy="${pts[i].y.toFixed(1)}" r="${r}"/>`;
   }).join('');
+
+  // Iter. 27 A3: vertikale Ende-Marker-Linie + Beschriftung. Nur sichtbar wenn
+  // wir das Auktions-Ende kennen UND es nicht direkt mit dem letzten Datenpunkt
+  // zusammenfaellt (sonst ueberlappt die Linie mit dem Latest-Punkt).
+  let endMarker = '';
+  if (endsMs && endsMs > series[series.length - 1].t) {
+    const ex   = x(endsMs);
+    const elbl = new Date(endsMs).toLocaleString('de-DE', {
+      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+    });
+    endMarker = `
+      <line class="end-marker-line" x1="${ex.toFixed(1)}" y1="${pad.t}" x2="${ex.toFixed(1)}" y2="${H - pad.b}"/>
+      <text class="end-marker-label" x="${ex.toFixed(1)}" y="${pad.t - 4}" text-anchor="middle">Ende ${esc(elbl)}</text>`;
+  }
 
   return `
 <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
@@ -2037,6 +2184,7 @@ function renderAuctionChart(series) {
   <path class="price-area" d="${area}"/>
   <path class="price-path" d="${path}"/>
   ${dots}
+  ${endMarker}
 </svg>`;
 }
 
@@ -2048,6 +2196,15 @@ async function hydrateSparklines() {
   const sparks = document.querySelectorAll('svg.auction-sparkline[data-deal-id]:empty');
   for (const svg of sparks) {
     const id = parseInt(svg.dataset.dealId, 10);
+    // Iter. 27 E16: Karten-Preis als finalen Sparkline-Punkt anhaengen damit
+    // Sparkline-Ende und Karten-Preis garantiert uebereinstimmen. Der Wrap-
+    // Container traegt data-deal-price + data-deal-lastseen, geschrieben in
+    // auctionInlineHtml() (siehe unten).
+    const wrap = svg.closest('.auction-spark-wrap');
+    const cardPrice = wrap?.dataset.dealPrice ? parseFloat(wrap.dataset.dealPrice) : null;
+    const lastSeenMs = wrap?.dataset.dealLastseen
+      ? new Date(wrap.dataset.dealLastseen).getTime() : null;
+
     let series = _sparkCache.get(id);
     if (!series) {
       try {
@@ -2057,13 +2214,29 @@ async function hydrateSparklines() {
           p: r.price,
           source: r.source || 'snapshot',
         }));
-        if (rows.some(r => r.source === 'ebay_bid')) {
-          series = buildAuctionProgressSeries(series);
-        }
+        // Iter. 27 E15: buildAuctionProgressSeries IMMER anwenden (auch fuer
+        // reine Snapshots) damit die Sparkline-Linie monoton steigend ist.
+        // Auktionen koennen niemals fallen — fallende Linie waere ein
+        // Render-Bug, kein Datenzustand.
+        series = buildAuctionProgressSeries(series);
         _sparkCache.set(id, series);
       } catch { continue; }
     }
-    if (series.length < 2) {
+
+    // E16: Wenn Karten-Preis > letzter Series-Punkt, haenge einen Shadow-Punkt
+    // an (eBay-Suche meldet hoeheren Preis als unsere Bid-History/Snapshots).
+    // So endet die Sparkline IMMER auf dem aktuellen Karten-Preis.
+    let displaySeries = series;
+    if (cardPrice != null && series.length
+        && cardPrice > series[series.length - 1].p + 0.01) {
+      const tEnd = Math.max(
+        lastSeenMs || Date.now(),
+        series[series.length - 1].t + 1,
+      );
+      displaySeries = [...series, { t: tEnd, p: cardPrice, shadow: true }];
+    }
+
+    if (displaySeries.length < 2) {
       // First scrape only — show a labeled hint instead of an empty box.
       svg.innerHTML = `
         <line x1="2" y1="16" x2="98" y2="16" stroke="rgba(244,114,182,0.35)" stroke-width="1" stroke-dasharray="2 3"/>
@@ -2073,21 +2246,32 @@ async function hydrateSparklines() {
         </text>`;
       continue;
     }
-    const ps = series.map(s => s.p);
+    const ps = displaySeries.map(s => s.p);
     const pMin = Math.min(...ps), pMax = Math.max(...ps);
     const span = Math.max(1, pMax - pMin);
-    const ts   = series.map(s => s.t);
+    const ts   = displaySeries.map(s => s.t);
     const tMin = ts[0], tMax = ts[ts.length - 1];
     const tSpan = Math.max(1, tMax - tMin);
-    const pts = series.map(s =>
-      `${((s.t - tMin) / tSpan * 100).toFixed(1)},${(28 - ((s.p - pMin) / span) * 24).toFixed(1)}`
-    );
-    const path  = `M ${pts.join(' L ')}`;
-    const area  = `M 0,32 L ${pts.join(' L ')} L 100,32 Z`;
-    const last  = pts[pts.length - 1].split(',');
+    const xy = displaySeries.map(s => ({
+      x: ((s.t - tMin) / tSpan) * 100,
+      y: 28 - ((s.p - pMin) / span) * 24,
+      shadow: s.shadow === true,
+    }));
+    // Step-line passend zum Modal-Chart (Iter. 27 A2-Parität).
+    let path = `M ${xy[0].x.toFixed(1)},${xy[0].y.toFixed(1)}`;
+    for (let i = 1; i < xy.length; i++) {
+      path += ` H ${xy[i].x.toFixed(1)} V ${xy[i].y.toFixed(1)}`;
+    }
+    let area = `M 0,32 L ${xy[0].x.toFixed(1)},${xy[0].y.toFixed(1)}`;
+    for (let i = 1; i < xy.length; i++) {
+      area += ` H ${xy[i].x.toFixed(1)} V ${xy[i].y.toFixed(1)}`;
+    }
+    area += ` L ${xy[xy.length - 1].x.toFixed(1)},32 Z`;
+    const last = xy[xy.length - 1];
+    const endpointCls = last.shadow ? 'sparkline-end-shadow' : '';
     svg.innerHTML = `<path class="auction-sparkline-area" d="${area}"/>
                      <path d="${path}"/>
-                     <circle cx="${last[0]}" cy="${last[1]}" r="1.6"/>`;
+                     <circle class="${endpointCls}" cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" r="1.6"/>`;
   }
 }
 
