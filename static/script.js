@@ -479,7 +479,8 @@ function buildSection(cat) {
 
   return `
 <div class="cat-row" data-id="${cat.id}" data-model="${esc(cat.name)}"
-     data-min="${s.min_price ?? ''}" data-avg="${s.avg_price ?? ''}">
+     data-min="${s.min_price ?? ''}" data-avg="${s.avg_price ?? ''}"
+     data-wish="${cat.wish_price ?? ''}">
   <div class="cat-row-head" onclick="toggleRow(this)">
     <span class="chevron">${icon('chevron')}</span>
     <span class="cat-name">${esc(cat.name)}</span>
@@ -526,8 +527,9 @@ async function toggleRow(head) {
   const inner = row.querySelector('.cat-panel-inner');
   const model = row.dataset.model;
   const stats = {
-    min_price: parseFloat(row.dataset.min) || null,
-    avg_price: parseFloat(row.dataset.avg) || null,
+    min_price:  parseFloat(row.dataset.min)  || null,
+    avg_price:  parseFloat(row.dataset.avg)  || null,
+    wish_price: parseFloat(row.dataset.wish) || null,
   };
 
   row.classList.toggle('open');
@@ -604,6 +606,10 @@ function dealCard(d, stats = {}) {
   const tags = [];
   const isNew = d.found_at && (Date.now() - new Date(d.found_at).getTime()) < 86_400_000;
   if (isNew) tags.push(`<span class="deal-tag tag-new">${icon('spark')} Neu</span>`);
+  // Iter. 26: Wunschpreis-Treffer — Felix' Zielpreis wird unterschritten
+  const belowWish = (stats.wish_price != null && d.price != null && d.price <= stats.wish_price);
+  if (belowWish)
+    tags.push(`<span class="deal-tag tag-wish">${icon('crown')} unter Wunsch (${stats.wish_price.toLocaleString('de-DE')} €)</span>`);
   if (d.price != null && stats.min_price != null && d.price <= stats.min_price)
     tags.push(`<span class="deal-tag tag-best">${icon('crown')} Bestpreis</span>`);
   if (d.price != null && stats.avg_price != null && d.price < stats.avg_price * 0.85)
@@ -649,7 +655,7 @@ function dealCard(d, stats = {}) {
   return `
 <div class="deal-card-wrap">
   ${blockMenuHtml(d)}
-  <a class="deal-card" href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.title)}">
+  <a class="deal-card${belowWish ? ' below-wish' : ''}" href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.title)}">
     ${imgHtml}
     <div class="deal-card-body">
       ${tags.length ? `<div class="deal-tags">${tags.join('')}</div>` : ''}
@@ -937,6 +943,11 @@ async function loadDrawerTargets() {
                    value="${t.min_price ?? ''}" placeholder="Min" title="Mindestpreis – Angebote darunter gelten als Fake und werden ausgeblendet" />
             <span class="input-suffix">€</span>
           </div>
+          <div class="input-with-suffix">
+            <input class="target-edit-input" data-field="wish_price" type="number" min="0" step="1"
+                   value="${t.wish_price ?? ''}" placeholder="Wunsch" title="Wunschpreis – Angebote darunter werden mit Gold-Rand markiert" />
+            <span class="input-suffix">€</span>
+          </div>
         </div>
       </div>`).join('');
 
@@ -952,6 +963,8 @@ async function loadDrawerTargets() {
           body = { retail_price: raw === '' ? null : parseFloat(raw) };
         } else if (field === 'min_price') {
           body = { min_price: raw === '' ? null : parseFloat(raw) };
+        } else if (field === 'wish_price') {
+          body = { wish_price: raw === '' ? null : parseFloat(raw) };
         } else {
           body = { group_name: raw || null };
         }
@@ -1077,7 +1090,7 @@ async function triggerScrape() {
     const cnt = li.querySelector('.prog-count');
     if (cnt) cnt.textContent = '';
   });
-  overlay.classList.remove('hidden');
+  overlay.classList.remove('hidden', 'minimized');   // Iter. 26: bei Start volle Ansicht
   try {
     const res = await api('/api/scrape', { method: 'POST' });
     if (res.status === 'already_running') {
@@ -1105,6 +1118,7 @@ async function pollUntilDone(opts = {}) {
       if (!s.scraping) {
         await sleep(400);
         if (!opts.noOverlay) overlay.classList.add('hidden');
+        overlay.classList.remove('minimized');     // reset for next run
         toast('Scraping abgeschlossen', 'success');
         loadDashboard();
         break;
@@ -1823,6 +1837,16 @@ async function refreshAuctionDeal(btn) {
     const res = await api(`/api/deals/${dealId}/refresh`, { method: 'POST' });
     _sparkCache.delete(dealId);            // invalidate sparkline cache
 
+    // Iter. 26: auction ended (Verkaeufer-Cancel oder Endzeit erreicht) → eBay
+    // sagt es ist vorbei, Backend hat available=0 gesetzt. Modal schliessen +
+    // Dashboard reloaden damit der Deal aus der Liste verschwindet.
+    if (res?.ended) {
+      toast('Auktion ist beendet — wurde aus der Liste entfernt', 'info');
+      closeAuctionModal();
+      loadDashboard();
+      return;
+    }
+
     const newPrice    = res?.deal?.price ?? null;
     const newBids     = res?.deal?.bid_count ?? null;
     const bidsImported = res?.bids_imported || 0;
@@ -1838,7 +1862,14 @@ async function refreshAuctionDeal(btn) {
     await openAuctionModal(dealId);         // re-render with fresh data
     setTimeout(() => loadDashboard(), 300); // pull fresh bid_count onto the cards
   } catch (err) {
-    toast(`Fehler: ${err?.message || 'unbekannt'}`, 'error');
+    // Iter. 26: api() throws on non-2xx — surface eBay-block specifically so
+    // Felix knows it's not our bug and to try again later.
+    const msg = err?.message || 'unbekannt';
+    if (/eBay-Block/i.test(msg) || /503/.test(msg)) {
+      toast('eBay blockt die Item-Seite gerade — versuch es in ein paar Minuten nochmal', 'warning');
+    } else {
+      toast(`Fehler: ${msg}`, 'error');
+    }
     if (lbl) lbl.textContent = orig;
     btn.disabled = false;
   } finally {
@@ -2082,6 +2113,28 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('add-target-btn').addEventListener('click', openAddModal);
   document.getElementById('scrape-btn').addEventListener('click', triggerScrape);
   document.getElementById('interval-input').addEventListener('change', saveInterval);
+
+  // Iter. 26: Scrape-Overlay minimieren — Felix wollte waehrend des Scrapings
+  // weiter mit der App arbeiten. Toggle via Header-Button, Click auf Backdrop
+  // (ausserhalb der Card), oder Click auf das minimierte Pillchen.
+  const _scrapeOverlay = document.getElementById('scrape-overlay');
+  const _scrapeMinBtn  = document.getElementById('scrape-overlay-min');
+  function minimizeScrapeOverlay() { _scrapeOverlay?.classList.add('minimized'); }
+  function maximizeScrapeOverlay() { _scrapeOverlay?.classList.remove('minimized'); }
+  _scrapeMinBtn?.addEventListener('click', e => {
+    e.stopPropagation();
+    if (_scrapeOverlay.classList.contains('minimized')) maximizeScrapeOverlay();
+    else minimizeScrapeOverlay();
+  });
+  _scrapeOverlay?.addEventListener('click', e => {
+    // Click direkt auf das Overlay (Backdrop) → minimieren. Click in der Card
+    // im minimierten Modus → maximieren.
+    if (e.target === _scrapeOverlay && !_scrapeOverlay.classList.contains('minimized')) {
+      minimizeScrapeOverlay();
+    } else if (_scrapeOverlay.classList.contains('minimized')) {
+      maximizeScrapeOverlay();
+    }
+  });
 
   // Modal
   document.getElementById('add-modal-close').addEventListener('click', closeAddModal);

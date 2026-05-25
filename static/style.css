@@ -1427,6 +1427,34 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
   place-items: center;
   animation: fadeIn 0.2s var(--ease-out);
 }
+/* Iter. 26: minimierbarer Overlay-Modus — Backdrop wird transparent + pass-
+   through, Card weicht in die rechte untere Ecke aus, UI ist wieder bedienbar */
+.overlay.minimized {
+  background: transparent;
+  backdrop-filter: none;
+  pointer-events: none;          /* Klicks gehen durch die Fenster-Mitte */
+  display: block;
+  animation: none;
+}
+.overlay.minimized .overlay-card {
+  position: fixed;
+  right: 1rem; bottom: 1rem;
+  min-width: 0;
+  max-width: 280px;
+  padding: 0.6rem 0.9rem;
+  pointer-events: auto;          /* nur die Pille faengt Klicks */
+  cursor: pointer;
+  animation: none;
+}
+.overlay.minimized .overlay-orb { width: 28px; height: 28px; margin: 0; }
+.overlay.minimized .overlay-orb-icon { width: 16px; height: 16px; }
+.overlay.minimized .overlay-orb-pulse { filter: blur(8px); }
+.overlay.minimized .overlay-title { font-size: 0.82rem; }
+.overlay.minimized .overlay-sub,
+.overlay.minimized .scrape-progress { display: none; }
+.overlay.minimized .overlay-minimize svg { transform: rotate(45deg); }   /* X wird + */
+.overlay.minimized .overlay-minimize { background: var(--accent-soft); border-color: var(--accent); }
+
 .overlay-card {
   background: var(--glass-bg-2);
   backdrop-filter: blur(28px) saturate(160%);
@@ -1434,7 +1462,7 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
   border-radius: var(--radius-lg);
   padding: 1.8rem 2.2rem 1.7rem;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   gap: 0.6rem;
   min-width: 320px;
@@ -1444,7 +1472,26 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
   overflow-y: auto;
   box-shadow: var(--shadow-lg), 0 0 48px var(--accent-soft);
   animation: modalIn 0.3s var(--ease-out);
+  position: relative;
 }
+.overlay:not(.minimized) .overlay-card {
+  flex-direction: column;        /* normale Anordnung im Vollbild-Modus */
+}
+.overlay-minimize {
+  position: absolute;
+  top: 0.6rem; right: 0.6rem;
+  width: 28px; height: 28px;
+  display: grid; place-items: center;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--glass-bdr);
+  border-radius: 50%;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.2s var(--ease-out);
+}
+.overlay-minimize:hover { color: #fff; background: rgba(255,255,255,0.10); transform: scale(1.05); }
+.overlay-minimize svg { width: 14px; height: 14px; transition: transform 0.2s var(--ease-out); }
+.overlay-hint { color: var(--text-dim); font-size: 0.72rem; opacity: 0.7; }
 
 .overlay-orb {
   position: relative;
@@ -2138,6 +2185,23 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
 /* Min-Preis input column in target-edit-row — expand to 3 cols */
 .target-edit-row {
   grid-template-columns: 1fr 88px 88px;
+}
+/* Iter. 26: 4. Spalte Wunschpreis. 2-Zeilen-Layout damit es nicht uebersteht. */
+.target-edit-row {
+  grid-template-columns: minmax(0, 1fr) 78px 78px 78px;
+}
+
+/* Iter. 26: Deal unter Wunschpreis → goldener Glow auf Card. */
+.deal-card.below-wish,
+.top-cat-card.below-wish {
+  border-color: rgba(251, 191, 36, 0.6);
+  box-shadow: 0 0 24px rgba(251, 191, 36, 0.22), inset 0 0 0 1px rgba(251, 191, 36, 0.18);
+}
+.tag-wish {
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.22), rgba(244, 114, 182, 0.18));
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  font-weight: 700;
 }
 
 /* Blocked drawer section */

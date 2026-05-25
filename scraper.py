@@ -988,6 +988,15 @@ def refresh_ebay_item(url: str) -> dict | None:
         logger.warning('refresh_ebay_item HTTP fail: %s', e)
         return None
 
+    # Iter. 26: Akamai serves a 13-30kB splash/captcha page instead of the real
+    # item page. The price/bid selectors would silently miss, AND the auction-
+    # ended-marker check would say "still live" — both leading to bad UX (fake
+    # "Aktualisiert OK" toast, deal never marked ended). Bail out honestly so
+    # the caller can surface a "eBay blockt gerade — spaeter nochmal" message.
+    if _ebay_response_is_blocked(r.text) or len(r.text) < 40_000:
+        logger.info('refresh_ebay_item: eBay returned splash/short page for %s (len=%d) — treating as blocked', url, len(r.text))
+        return {'blocked': True}
+
     soup = BeautifulSoup(r.text, 'lxml')
     out: dict = {}
 
@@ -1050,6 +1059,15 @@ def refresh_ebay_item(url: str) -> dict | None:
         '"itemavailability":"outofstock"',
         '"itemavailability":"discontinued"',
         '"itemavailability":"soldout"',
+        # Iter. 26: Verkaeufer-Cancel-Faelle die mit "Dieses Angebot wurde vom
+        # Verkaeufer ... beendet" / "Originalangebot ansehen" als roter BEENDET-
+        # Badge erscheinen. Felix' Screenshot 2026-05-24 (deal 267678357840).
+        'originalangebot ansehen',
+        'wurde vom verkäufer',
+        'wurde vom verkaeufer',
+        'angebot wurde vom verkäufer',
+        'da es einen fehler enthielt',
+        '>beendet<',                # roter Status-Tag direkt im DOM
     )
     if any(m_ in body_lo for m_ in ended_markers):
         out['ended'] = True

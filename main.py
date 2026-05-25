@@ -118,6 +118,27 @@ def _run_flask():
                   use_reloader=False, threaded=True)
 
 
+def _print_lan_urls():
+    """Zeigt alle LAN-IPs auf denen Flask erreichbar ist — nuetzlich wenn
+    HOST=0.0.0.0 gesetzt ist und Felix vom Handy zugreifen will."""
+    if HOST not in ('0.0.0.0', ''):
+        return
+    try:
+        import socket
+        hostname = socket.gethostname()
+        ips = set()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith('127.'):
+                ips.add(ip)
+        if ips:
+            print('Erreichbar vom Handy/LAN unter:')
+            for ip in sorted(ips):
+                print(f'  http://{ip}:{PORT}')
+    except Exception:
+        pass
+
+
 def _find_browser():
     for path in BROWSER_CANDIDATES:
         if os.path.exists(path):
@@ -156,6 +177,7 @@ def main():
 
     flask_thread = threading.Thread(target=_run_flask, daemon=True)
     flask_thread.start()
+    _print_lan_urls()
 
     for _ in range(20):
         time.sleep(0.3)

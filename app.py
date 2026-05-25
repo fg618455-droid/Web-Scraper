@@ -199,7 +199,10 @@ def _refresh_one_auction(deal: dict) -> bool:
     user-triggered button and this background pass.
     """
     fresh = scraper.refresh_ebay_item(deal['url'])
-    if fresh is None:
+    if fresh is None or fresh.get('blocked'):
+        # Iter. 26: Akamai-Block — silently skip, don't fake an update or
+        # accidentally retire a live auction because the splash page has no
+        # ended-marker.
         return False
     merged = dict(deal)
     merged.update(fresh)
@@ -598,7 +601,7 @@ def api_update_target(target_id: int):
     kwargs = {}
     if 'group_name' in data:
         kwargs['group_name'] = (data.get('group_name') or '').strip() or None
-    for fld in ('retail_price', 'min_price'):
+    for fld in ('retail_price', 'min_price', 'wish_price'):
         if fld in data:
             raw = data.get(fld)
             try:
@@ -694,6 +697,28 @@ def api_refresh_deal(deal_id: int):
     fresh = scraper.refresh_ebay_item(deal['url'])
     if fresh is None:
         return jsonify({'error': 'eBay-Seite nicht erreichbar'}), 502
+    if fresh.get('blocked'):
+        # Iter. 26: Akamai-Block — sei ehrlich statt fake-success zu liefern.
+        return jsonify({'error': 'eBay-Block aktiv — bitte spaeter nochmal versuchen',
+                        'blocked': True}), 503
+
+    # Auction-ended detection (Iter. 26 — parity with background refresh thread):
+    # if eBay's item page shows "Dieses Angebot wurde vom Verkaeufer beendet" /
+    # "Diese Auktion ist beendet" / "sold for" / itemAvailability=OutOfStock,
+    # retire the deal so the UI stops showing it as live.
+    if fresh.get('ended'):
+        try:
+            conn = db.get_connection()
+            conn.execute('UPDATE deals SET available=0, last_seen=? WHERE id=?',
+                         (datetime.now().isoformat(), deal['id']))
+            conn.commit()
+            conn.close()
+            logger.info(f'manual refresh: auction {deal_id} marked ended')
+        except Exception as e:
+            logger.warning('failed to mark ended auction %s: %s', deal_id, e)
+        refreshed = db.get_deal_by_id(deal_id)
+        return jsonify({'ok': True, 'deal': refreshed, 'ended': True,
+                        'bids_imported': 0, 'bid_history_blocked': False})
 
     # Build a partial-update dict that keeps existing fields. fresh now contains
     # ONLY keys we successfully parsed (no Nones), so .update() is safe.
@@ -897,6 +922,7 @@ def api_dashboard():
             'group_name':   group,
             'retail_price': t.get('retail_price'),
             'min_price':    t.get('min_price'),
+            'wish_price':   t.get('wish_price'),
             'apple_price':  t.get('apple_price'),
             'sources':      group_sources_cache.get(group, []) if group else [],
             'stats':        db.get_target_summary(t['name']),

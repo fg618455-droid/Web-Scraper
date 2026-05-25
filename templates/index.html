@@ -338,12 +338,15 @@
 <!-- Scrape overlay -->
 <div id="scrape-overlay" class="overlay hidden">
   <div class="overlay-card">
+    <button type="button" class="overlay-minimize" id="scrape-overlay-min" title="In den Hintergrund (du kannst weiterarbeiten)">
+      <svg><use href="#i-x"/></svg>
+    </button>
     <div class="overlay-orb">
       <div class="overlay-orb-pulse"></div>
       <svg class="overlay-orb-icon spin"><use href="#i-refresh"/></svg>
     </div>
     <div class="overlay-title">Scraping läuft…</div>
-    <div class="overlay-sub">Suche nach neuen Deals auf allen Quellen</div>
+    <div class="overlay-sub">Suche nach neuen Deals auf allen Quellen <span class="overlay-hint">— Klick neben das Fenster zum Minimieren</span></div>
     <ul id="scrape-progress" class="scrape-progress">
       <li data-site="Kleinanzeigen"><span class="prog-state"></span><span class="prog-name">Kleinanzeigen</span><span class="prog-count"></span></li>
       <li data-site="eBay"><span class="prog-state"></span><span class="prog-name">eBay</span><span class="prog-count"></span></li>

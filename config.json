@@ -1,5 +1,6 @@
 {
     "host": "127.0.0.1",
+    "_host_help": "127.0.0.1 = nur lokal. 0.0.0.0 = auch im LAN/Tailscale erreichbar (Handy). Bei 0.0.0.0 zeigt main.py beim Start die erreichbaren IPs.",
     "port": 5001,
     "max_workers": 12,
     "browser_fullscreen": true,

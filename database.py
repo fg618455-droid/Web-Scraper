@@ -149,6 +149,7 @@ def _run_migrations(c):
         ('retail_price', 'REAL'),
         ('min_price',    'REAL'),
         ('apple_price',  'REAL'),
+        ('wish_price',   'REAL'),     # Iter. 26: Felix' Zielpreis - Deals darunter werden in UI hervorgehoben
     ]:
         try:
             c.execute(f'ALTER TABLE search_targets ADD COLUMN {col} {typedef}')
@@ -1181,7 +1182,8 @@ def add_target(name: str, keyword: str,
 def update_target(target_id: int, *,
                   group_name: str | None | object = ...,
                   retail_price: float | None | object = ...,
-                  min_price: float | None | object = ...) -> None:
+                  min_price: float | None | object = ...,
+                  wish_price: float | None | object = ...) -> None:
     """Partial update of a target. Pass `...` to skip a field."""
     conn = get_connection()
     c = conn.cursor()
@@ -1195,6 +1197,9 @@ def update_target(target_id: int, *,
     if min_price is not ...:
         sets.append('min_price = ?')
         params.append(min_price)
+    if wish_price is not ...:
+        sets.append('wish_price = ?')
+        params.append(wish_price)
     if sets:
         params.append(target_id)
         c.execute(f'UPDATE search_targets SET {", ".join(sets)} WHERE id = ?', params)
