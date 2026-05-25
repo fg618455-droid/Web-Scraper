@@ -152,8 +152,8 @@ def check_updates_and_prompt():
         from tkinter import messagebox
         from updater import check_for_updates, download_and_update
 
-        latest_version, release_url = check_for_updates()
-        if latest_version and release_url:
+        latest_version, release_data = check_for_updates()
+        if latest_version and release_data:
             root = tk.Tk()
             root.withdraw()
             root.attributes("-topmost", True)
@@ -161,12 +161,13 @@ def check_updates_and_prompt():
             result = messagebox.askyesno(
                 "Update verfuegbar!",
                 "Eine neue Version (v{}) des Deal Scrapers ist verfuegbar."
-                "\n\nMoechtest du die Release-Seite im Browser oeffnen, um"
-                " den Download zu starten?".format(latest_version)
+                "\n\nJetzt automatisch herunterladen und installieren?"
+                " Die App startet danach mit der neuen Version neu."
+                .format(latest_version)
             )
 
             if result:
-                download_and_update(release_url, latest_version)
+                download_and_update(release_data, latest_version)
             root.destroy()
     except Exception:
         pass

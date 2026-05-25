@@ -21,8 +21,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-SESSION_PATH = os.path.join(BASE_DIR, 'ebay_session.json')
+from paths import resolve_user_file, user_data_dir
+
+BASE_DIR     = user_data_dir()
+SESSION_PATH = resolve_user_file('ebay_session.json')
 
 # Tracks the most recent login attempt so the UI can poll status.
 _state_lock = threading.Lock()

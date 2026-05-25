@@ -1,16 +1,13 @@
 import sqlite3
 import os
-import sys
 from datetime import datetime
 
-# When running as a PyInstaller bundle, __file__ points into _internal/ (the
-# temp extraction dir that changes every version). Store the DB next to the
-# .exe instead so data survives across updates.
-if getattr(sys, 'frozen', False):
-    _DB_BASE = os.path.dirname(sys.executable)
-else:
-    _DB_BASE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(_DB_BASE, 'deals.db')
+from paths import resolve_user_file
+
+# deals.db landet im User-Daten-Ordner (%APPDATA%\DealScraper bei frozen,
+# Projekt-Wurzel bei dev). Migration aus Legacy-Pfaden passiert beim ersten
+# Aufruf von resolve_user_file. Siehe paths.py.
+DB_PATH = resolve_user_file('deals.db')
 
 
 def get_connection():
