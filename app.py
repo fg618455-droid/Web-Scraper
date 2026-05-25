@@ -62,7 +62,9 @@ _timer: threading.Timer | None = None
 # Background auction-refresh thread state
 _auction_refresh_thread: threading.Thread | None = None
 _auction_refresh_stop = threading.Event()
-AUCTION_REFRESH_EVERY_SEC = 30 * 60   # every 30 min
+AUCTION_REFRESH_EVERY_SEC      = 30 * 60   # default tick: every 30 min
+AUCTION_REFRESH_HOT_EVERY_SEC  = 10 * 60   # Iter. 27 F18: schneller wenn Auktion bald endet
+AUCTION_HOT_THRESHOLD_SEC      = 24 * 3600 # "bald endet" = innerhalb 24h
 AUCTION_REFRESH_MAX_ITEMS = 25        # cap per pass — avoid hammering eBay
 
 # Background geocode thread state (Iter. 24 PLZ filter)
@@ -228,11 +230,18 @@ def _refresh_one_auction(deal: dict) -> bool:
 
     # Authoritative bid timeline if reachable — replaces our sampled snapshots
     # with every single bid increment eBay records.
+    # Iter. 27 F17: Ohne gespeicherte Login-Session frisst der Aufruf nur
+    # nutzlose Akamai-Cooldowns (unauth-Pfad ist seit 2026-05-18 dauerhaft
+    # geblockt). Wir versuchen den Auto-Pull NUR wenn der User eingeloggt ist.
+    # Manuelles "Jetzt aktualisieren" + "Gebote einfuegen" funktioniert
+    # weiterhin (api_refresh_deal probiert es trotzdem fuer User-Feedback).
     if merged.get('listing_type') == 'auction':
         try:
-            bids = scraper.scrape_ebay_bid_history(deal['url'])
-            if bids:
-                db.replace_price_history(deal['id'], bids)
+            from ebay_session import has_session as _ebay_has_session
+            if _ebay_has_session():
+                bids = scraper.scrape_ebay_bid_history(deal['url'])
+                if bids:
+                    db.replace_price_history(deal['id'], bids)
         except Exception as e:
             logger.warning('bid-history refresh for %s failed: %s', deal.get('id'), e)
     return True
@@ -252,12 +261,15 @@ def _auction_refresh_loop() -> None:
     requests would just heat up rate-limits without benefit).
     """
     logger.info('Auction refresh thread started '
-                f'(every {AUCTION_REFRESH_EVERY_SEC // 60} min, '
+                f'(default {AUCTION_REFRESH_EVERY_SEC // 60} min, '
+                f'hot {AUCTION_REFRESH_HOT_EVERY_SEC // 60} min, '
                 f'max {AUCTION_REFRESH_MAX_ITEMS} per pass)')
     # First wait, then run — gives the initial scrape time to populate the DB.
-    while not _auction_refresh_stop.wait(AUCTION_REFRESH_EVERY_SEC):
+    next_wait = AUCTION_REFRESH_EVERY_SEC
+    while not _auction_refresh_stop.wait(next_wait):
         if scraper.STATUS.get('scraping'):
             logger.debug('Auction refresh: skipped (global scrape in progress)')
+            next_wait = AUCTION_REFRESH_EVERY_SEC
             continue
         try:
             # Retire any auctions whose end-time has passed before fetching
@@ -269,7 +281,24 @@ def _auction_refresh_loop() -> None:
 
             auctions = db.get_active_auctions(min_bids=1, limit=AUCTION_REFRESH_MAX_ITEMS)
             if not auctions:
+                next_wait = AUCTION_REFRESH_EVERY_SEC
                 continue
+
+            # Iter. 27 F18: Wenn mindestens eine Auktion innerhalb 24h endet,
+            # nutzen wir den schnelleren Hot-Interval fuer den naechsten Pass.
+            # Sonst Default.  So bekommen Auktionen die *gleich* enden
+            # haeufiger Snapshots, ohne das System mit unnoetigen Polls zu
+            # belasten wenn alles "kalt" ist.
+            now_iso = datetime.now().isoformat()
+            hot = any(
+                d.get('auction_ends_at')
+                and d['auction_ends_at'] > now_iso
+                and (datetime.fromisoformat(d['auction_ends_at']) - datetime.now()).total_seconds()
+                    < AUCTION_HOT_THRESHOLD_SEC
+                for d in auctions
+            )
+            next_wait = AUCTION_REFRESH_HOT_EVERY_SEC if hot else AUCTION_REFRESH_EVERY_SEC
+
             ok = 0
             for deal in auctions:
                 if _auction_refresh_stop.is_set():
@@ -282,9 +311,13 @@ def _auction_refresh_loop() -> None:
                 # Polite jitter between item requests so eBay doesn't see a
                 # burst. ~1 s × 25 items = ~25 s extra per pass — negligible.
                 time.sleep(1.0)
-            logger.info(f'Auction refresh: {ok}/{len(auctions)} auctions polled')
+            logger.info(
+                f'Auction refresh: {ok}/{len(auctions)} auctions polled '
+                f'(next pass in {next_wait // 60} min, hot={hot})'
+            )
         except Exception:
             logger.exception('Auction refresh pass crashed')
+            next_wait = AUCTION_REFRESH_EVERY_SEC
 
 
 def _start_auction_refresh() -> None:

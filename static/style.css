@@ -2029,6 +2029,15 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
 }
 .auction-sparkline path { fill: none; stroke: #f472b6; stroke-width: 1.6; }
 .auction-sparkline circle { fill: #f472b6; }
+/* Iter. 27 E16: Endpunkt der Sparkline ist ein Shadow-Punkt (= Karten-Preis
+   neuer als unsere Bid-History). Gestrichelter Outline-Stil signalisiert
+   "Suche-Daten, kein bestaetigtes Gebot". */
+.auction-sparkline circle.sparkline-end-shadow {
+  fill: rgba(244, 114, 182, 0.18);
+  stroke: #f472b6;
+  stroke-width: 0.6;
+  stroke-dasharray: 1 1;
+}
 .auction-sparkline-area { fill: rgba(244, 114, 182, 0.2); stroke: none; }
 .auction-sparkline text {
   font-family: 'Inter', -apple-system, sans-serif;
@@ -2083,6 +2092,14 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
   color: var(--text);
 }
 .auction-meta-card-value.accent-pink { color: #f472b6; }
+/* Iter. 27 B8: absolute Endzeit unter dem Countdown im Meta-Card */
+.auction-meta-card-sub {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-top: 0.18rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
 .auction-chart {
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--glass-bdr);
@@ -2112,6 +2129,30 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
 @keyframes latestPulse {
   0%, 100% { transform: scale(1);   opacity: 1; }
   50%      { transform: scale(1.35); opacity: 0.85; }
+}
+/* Iter. 27 A4: Schatten-Punkt fuer "aktueller Stand laut Suche". Gestrichelt
+   damit klar wird dass das KEIN echtes Gebot aus der Bid-History ist, sondern
+   der von eBay's Suchergebnis gemeldete Stand der bei Re-Scrape eingelaufen ist
+   bevor der Bid-History-Paste aktualisiert wurde. */
+.auction-chart .price-point-shadow {
+  fill: rgba(244, 114, 182, 0.18);
+  stroke: #f472b6;
+  stroke-width: 1.5;
+  stroke-dasharray: 2 2;
+}
+/* Iter. 27 A3: Ende-Marker — vertikale rote Linie + Label damit Felix sieht
+   wie viel Zeit zwischen dem letzten Gebot und Auktionsende noch liegt. */
+.auction-chart .end-marker-line {
+  stroke: #ef4444;
+  stroke-width: 1.4;
+  stroke-dasharray: 3 4;
+  opacity: 0.85;
+}
+.auction-chart .end-marker-label {
+  fill: #ef4444;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
 }
 .auction-chart-empty {
   text-align: center;

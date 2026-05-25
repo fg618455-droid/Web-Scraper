@@ -143,10 +143,13 @@ def _run_login_flow() -> None:
             # Iter. 26: Reset bid-history cooldown — a fresh login means we
             # should immediately retry, even if the previous unauthenticated
             # attempts had triggered the 30-min Akamai cooldown.
+            # Iter. 27 C10: Reset BEIDE Cooldowns (unauth + auth) damit der
+            # naechste Request sofort versucht wird.
             try:
                 import scraper as _scr
-                _scr._EBAY_BLOCKED_UNTIL = 0
-                logger.info('bid-history cooldown reset after login save')
+                _scr._EBAY_BLOCKED_UNTIL      = 0
+                _scr._EBAY_AUTH_BLOCKED_UNTIL = 0
+                logger.info('bid-history cooldowns reset after login save')
             except Exception:
                 pass
 
