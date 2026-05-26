@@ -121,9 +121,34 @@
       font-size: 10px; font-weight: 700; text-transform: uppercase;
       letter-spacing: 1.2px; color: #64748b;
     }
+    /* Iter. 36: Live-Progress-Banner — was wird gerade gescrapt */
+    .live-banner {
+      display: none;
+      align-items: center; gap: 8px;
+      margin: 10px 0 4px;
+      padding: 8px 12px;
+      background: linear-gradient(135deg, rgba(99,102,241,0.18), rgba(139,92,246,0.18));
+      border: 1px solid rgba(139,92,246,0.4);
+      border-radius: 9px;
+      font-size: 11.5px; line-height: 1.35;
+      color: #e2e8f0;
+    }
+    .live-banner.on { display: flex; }
+    .live-banner-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #8b5cf6;
+      box-shadow: 0 0 8px #8b5cf6;
+      animation: pulse 1.2s infinite;
+      flex-shrink: 0;
+    }
+    .live-banner b { font-weight: 700; color: #f1f5f9; }
+    .live-banner .grp { color: #94a3b8; font-size: 10.5px; margin-left: 4px; }
     .sites {
       flex: 1 1 auto; overflow-y: auto;
-      display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+      display: grid;
+      /* Iter. 36: auto-fill macht 2 oder 3 Spalten je nach Window-Breite */
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 6px;
       padding-right: 4px;
     }
     .sites::-webkit-scrollbar { width: 6px; }
@@ -204,6 +229,15 @@
   <span>Intervall</span><span id="interval">—</span>
 </div>
 
+<!-- Iter. 36: Live-Progress-Banner -->
+<div class="live-banner" id="live-banner">
+  <span class="live-banner-dot"></span>
+  <span>
+    Suche <b id="live-kw">…</b> auf <b id="live-site">…</b>
+    <span class="grp" id="live-grp"></span>
+  </span>
+</div>
+
 <div class="sites-title">Quellen</div>
 <div class="sites" id="sites"></div>
 
@@ -233,11 +267,14 @@ function fmtDur(ms) {
 function renderSites(sites) {
   const order = Object.keys(sites || {});
   const root = $('sites');
-  // DOM-Methoden statt innerHTML — Site-Namen koennten irgendwann
-  // exotische Zeichen enthalten, also kein String-Concat hier.
   root.replaceChildren();
   for (const name of order) {
     const s = sites[name] || {};
+    // Iter. 36: Sites die in keiner Gruppen-Quellen-Liste enthalten sind
+    // ausblenden — sonst wirken sie wie "0 Treffer" obwohl sie absichtlich
+    // nicht gescrapt werden. Backend liefert eligible=true/false pro Site.
+    if (s.eligible === false) continue;
+    if (s.status === 'skipped') continue;
     const cls = s.ok === true ? 'ok' : s.ok === false ? 'err' : '';
     const count = (s.count != null) ? String(s.count) : '–';
     const row = document.createElement('div');
@@ -253,6 +290,21 @@ function renderSites(sites) {
     cnt.textContent = count;
     row.append(pill, lbl, cnt);
     root.append(row);
+  }
+}
+
+// Iter. 36: Live-Progress-Banner aktualisieren
+function renderLive(scraping, current) {
+  const banner = $('live-banner');
+  if (!banner) return;
+  const c = current || {};
+  if (scraping && (c.site || c.target)) {
+    $('live-kw').textContent   = c.keyword || c.target || '…';
+    $('live-site').textContent = c.site || '…';
+    $('live-grp').textContent  = c.group ? `· Gruppe „${c.group}"` : '';
+    banner.classList.add('on');
+  } else {
+    banner.classList.remove('on');
   }
 }
 
@@ -283,6 +335,7 @@ async function refresh() {
       ? (interval >= 60 ? `${Math.round(interval/60)} h` : `${interval} min`)
       : 'aus';
 
+    renderLive(scraping, data.current);
     renderSites(sites);
   } catch (e) {
     $('state').textContent = 'Offline';

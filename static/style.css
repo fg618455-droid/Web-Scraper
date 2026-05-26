@@ -359,6 +359,18 @@ svg { display: block; }
   height: 32px;
   white-space: nowrap;
 }
+/* Iter. 36: Status-Pille ist klickbar -> oeffnet Scrape-Fenster */
+.status-pill-btn {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.status-pill-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--accent);
+}
+.status-pill-btn:active { transform: scale(0.97); }
 
 .dot {
   width: 7px; height: 7px;
@@ -1465,9 +1477,10 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
   flex-direction: row;
   align-items: center;
   gap: 0.6rem;
+  /* Iter. 36: deutlich breiteres Overlay damit die ~67 Sites in 2-3 Spalten
+     reinpassen statt in einer langen vertikalen Liste. */
   min-width: 320px;
-  /* With many sources the list grows past the viewport — let the card scroll
-     instead of clipping the bottom items (Apple, etc.). */
+  width: min(92vw, 1100px);
   max-height: 90vh;
   overflow-y: auto;
   box-shadow: var(--shadow-lg), 0 0 48px var(--accent-soft);
@@ -1534,22 +1547,58 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
   list-style: none;
   padding: 0; margin: 0;
   width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
+  /* Iter. 36: 2-3 Spalten je nach Breite, damit 67 Sites nicht eine endlose
+     Liste werden. Auto-fill macht responsive 1/2/3 Spalten. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.4rem 0.6rem;
 }
 .scrape-progress li {
-  font-size: 0.82rem;
+  font-size: 0.85rem;
   color: var(--text-2);
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  padding: 0.42rem 0.7rem;
+  padding: 0.48rem 0.75rem;
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid var(--glass-bdr);
   border-radius: 9px;
   transition: all 0.2s;
 }
+/* Iter. 36: skipped Sites (nicht in Gruppen-Quellen) — wenn sie schon im
+   statischen HTML stehen, dim sie deutlich aus statt komplett zu verstecken. */
+.scrape-progress li.prog-skipped {
+  display: none;
+}
+/* Iter. 36: Live-Progress-Banner — zeigt aktuell laufende Site/Gruppe */
+.overlay-current {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.9rem;
+  margin: 0 0 0.85rem 0;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  color: var(--text-1);
+  font-size: 0.85rem;
+  line-height: 1.35;
+  animation: modalIn 0.25s var(--ease-out);
+}
+.overlay-current.hidden { display: none; }
+.overlay-current-icon {
+  width: 18px; height: 18px;
+  display: grid; place-items: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.overlay-current-icon svg {
+  width: 16px; height: 16px;
+  animation: spin 1.4s linear infinite;
+}
+.overlay-current-text b { color: var(--text-1); font-weight: 700; }
+.overlay-current-group { color: var(--text-dim); margin-left: 0.4rem; font-size: 0.78rem; }
 .prog-state {
   width: 14px; height: 14px;
   flex-shrink: 0;

@@ -65,11 +65,23 @@ _SITE_NAMES = [
 STATUS = {
     'last_scrape': None,
     'scraping':    False,
+    # Iter. 36: Live-Status was aktuell laeuft (Site/Target/Keyword/Group).
+    # UI zeigt das im Overlay an: "Suche „macbook air m4" auf MediaMarkt (Computer Apple)"
+    'current': {
+        'site': None, 'target': None, 'keyword': None, 'group': None,
+    },
     'sites': {
         name: {'ok': None, 'last': None, 'count': 0, 'status': None, 'detail': None}
         for name in _SITE_NAMES
     },
 }
+
+
+def _set_current(site=None, target=None, keyword=None, group=None) -> None:
+    """Iter. 36: Update the live-progress hint shown in the scrape overlay."""
+    STATUS['current'] = {
+        'site': site, 'target': target, 'keyword': keyword, 'group': group,
+    }
 
 
 def _load_last_scrape_from_db() -> None:
@@ -2867,15 +2879,20 @@ def _make_generic_parser(website: str, item_selectors: list[str], base_url: str)
         deals = []
         for item in soup.select(item_sel):
             try:
+                # Iter. 36: data-test (ohne 'id') faengt MediaMarkt/Saturn ab;
+                # data-cy faengt ReBuy ab.
                 title_el = item.select_one(
                     'h2, h3, h4, [class*="title"], [class*="name"], '
                     '[class*="Title"], [class*="Name"], a[title], '
                     '[data-testid*="title"], [data-testid*="name"], '
+                    '[data-test*="title"], [data-test*="name"], '
+                    '[data-cy*="title"], [data-cy*="name"], '
                     '[itemprop="name"]'
                 )
                 price_el = item.select_one(
                     '[class*="price"], [class*="Price"], .price, span.price, '
                     '[data-testid*="price"], [itemprop="price"], '
+                    '[data-test*="price"], [data-cy*="price"], '
                     '[class*="cost"], [class*="amount"]'
                 )
                 link_el  = item.select_one('a[href]')
@@ -3241,6 +3258,23 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
     ]
     _generic_wait_sel = ', '.join(_generic_card_selectors)
 
+    # Iter. 36 Stufe B: Site-spezifische Card-Selektoren — aus debug_html
+    # extrahiert (siehe project_iter_36_site_tuning memory).
+    # Wenn ein Site-Name hier drin steht, nutzen wir DIESE Selektoren
+    # statt der generischen Liste — _make_generic_parser pickt damit nur
+    # die echten Produkt-Cards (nicht zufaellige Nav-Elemente).
+    _site_specific_selectors: dict[str, list[str]] = {
+        # MediaMarkt + Saturn: gleiche Ceconomy-DOM-Struktur
+        'MediaMarkt':  ['[data-test="mms-product-card"]'],
+        'Saturn':      ['[data-test="mms-product-card"]'],
+        # Uhrinstinkt + Gravis: Shopware-Standard
+        'Uhrinstinkt': ['.product--box', '[class*="product--box"]', '.product-slider--item'],
+        # Uhrzeit.org: eigenes .proBox/.proText/.proPreis-Schema
+        'Uhrzeit.org': ['.proBox'],
+        # ReBuy: Bootstrap-basiert, .ry-card.product Wrapper
+        'ReBuy':       ['.ry-card.product', '[data-cy*="product-card"]'],
+    }
+
     # (name, search_url_template, base_url, settle_ms)
     _new_shops = [
         # ── Tech / Elektronik ────────────────────────────────────────
@@ -3298,14 +3332,17 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
     ]
 
     for _name, _tmpl, _base, _settle in _new_shops:
+        # Iter. 36 Stufe B: site-spezifische Selektoren wenn vorhanden, sonst generic
+        _site_sel = _site_specific_selectors.get(_name, _generic_card_selectors)
+        _wait_sel = ', '.join(_site_sel) if _name in _site_specific_selectors else _generic_wait_sel
         # default-arg trick um _tmpl / _base je Iteration einzufrieren
         # (sonst captured Late-Binding ueberschreibt alle Lambdas auf den letzten Wert)
         configs.append((
             _name,
             (lambda kw, t=_tmpl: t.format(kw=kw.replace(' ', '+'))),
-            _make_generic_parser(_name, _generic_card_selectors, _base),
+            _make_generic_parser(_name, _site_sel, _base),
             _settle,
-            _generic_wait_sel,
+            _wait_sel,
         ))
 
     try:
@@ -3349,7 +3386,10 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
                 ]
                 if not eligible_targets:
                     logger.debug(f'{name}: skipped — no active group allows this source')
-                    _set_site_status(name, status='ok', detail='Nicht in Gruppen-Quellen', count=0, ok=True)
+                    # Iter. 36: 'skipped' statt 'ok' damit die UI das deutlich
+                    # anders darstellt als "Seite OK, 0 Treffer" (= empty).
+                    _set_site_status(name, status='skipped',
+                                     detail='Nicht in Gruppen-Quellen', count=0, ok=True)
                     continue
 
                 ua = random.choice(_USER_AGENTS)
@@ -3400,6 +3440,11 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
                     # if the previous target killed the page object.
                     if i > 0:
                         time.sleep(random.uniform(2.0, 5.0))
+
+                    # Iter. 36: Live-Progress — UI zeigt "Suche „X" auf <Site> (Gruppe Y)"
+                    _set_current(site=name, target=target.get('name'),
+                                 keyword=target.get('keyword'),
+                                 group=target.get('group_name'))
 
                     url = url_builder(target['keyword'])
                     try:
@@ -3622,6 +3667,7 @@ def run_scrape(callback=None, targets=None) -> list[dict]:
 
     STATUS['last_scrape'] = datetime.now().isoformat()
     STATUS['scraping']    = False
+    _set_current()  # Iter. 36: clear live-progress hint
 
     if callback:
         try:

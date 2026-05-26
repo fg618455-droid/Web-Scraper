@@ -210,10 +210,11 @@
         <option value="1440">24 h</option>
       </select>
     </div>
-    <div class="status-pill" title="Status">
+    <button type="button" class="status-pill status-pill-btn" id="status-pill"
+            title="Scrape-Fenster öffnen">
       <span class="dot" id="status-dot"></span>
       <span id="status-text" class="dim">–</span>
-    </div>
+    </button>
     <button class="btn-icon" id="settings-btn" title="Einstellungen">
       <svg><use href="#i-settings"/></svg>
     </button>
@@ -375,6 +376,14 @@
     </div>
     <div class="overlay-title">Scraping läuft…</div>
     <div class="overlay-sub">Suche nach neuen Deals auf allen Quellen <span class="overlay-hint">— Klick neben das Fenster zum Minimieren</span></div>
+    <!-- Iter. 36: Live-Progress-Banner zeigt was gerade läuft -->
+    <div id="scrape-current" class="overlay-current hidden">
+      <span class="overlay-current-icon"><svg><use href="#i-refresh"/></svg></span>
+      <span class="overlay-current-text">
+        Suche <b id="scrape-current-keyword">…</b> auf <b id="scrape-current-site">…</b>
+        <span class="overlay-current-group" id="scrape-current-group"></span>
+      </span>
+    </div>
     <ul id="scrape-progress" class="scrape-progress">
       <li data-site="Kleinanzeigen"><span class="prog-state"></span><span class="prog-name">Kleinanzeigen</span><span class="prog-count"></span></li>
       <li data-site="eBay"><span class="prog-state"></span><span class="prog-name">eBay</span><span class="prog-count"></span></li>

@@ -709,6 +709,8 @@ def main():
     # Module-Globals so setzen dass app.py /api/window/show drauf zugreifen kann
     import app as _app_module
     _app_module.window_show_callback = _show_main_window
+    # Iter. 36: Klick auf Status-Pille im Hauptfenster oeffnet Scrape-Fenster
+    _app_module.scrape_window_show_callback = _show_scrape_window
 
     # PyWebView-Windows aufsetzen + starten (blockt bis alle destroyed)
     try:
@@ -754,9 +756,11 @@ def main():
     scrape_win = webview.create_window(
         'Deal Tracker — Scrape',
         f'{URL}/scrape-window',
-        width=380,
-        height=540,
-        min_size=(320, 420),
+        # Iter. 36: groesseres Fenster (vorher 380x540) damit mehr Sites
+        # gleichzeitig sichtbar sind. Bei 67 Sites war's vorher zu klein.
+        width=560,
+        height=760,
+        min_size=(420, 540),
         background_color='#0b1220',
         hidden=True,
         on_top=True,

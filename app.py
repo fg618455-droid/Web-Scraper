@@ -7,6 +7,7 @@ import csv
 import io
 import logging
 import os
+import queue as _queue_mod
 import re
 import threading
 import time
@@ -92,6 +93,8 @@ def api_health():
 # Iter. 34: main.py setzt das auf _show_main_window — wird vom Single-Instance-
 # Pfad genutzt um die laufende App in den Vordergrund zu holen.
 window_show_callback = None
+# Iter. 36: Klick auf Status-Pille soll Scrape-Fenster oeffnen.
+scrape_window_show_callback = None
 
 
 @app.route('/api/window/show', methods=['GET', 'POST'])
@@ -110,6 +113,19 @@ def api_window_show():
                     webview.windows[0].show()
             except Exception:
                 pass
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/scrape-window/show', methods=['GET', 'POST'])
+def api_scrape_window_show():
+    """Iter. 36: oeffnet das Scrape-Status-Fenster (gleicher Pfad wie der
+    Tray-Eintrag „Scrape-Fenster"). Klick-Handler an der Status-Pille
+    im Hauptfenster."""
+    try:
+        if scrape_window_show_callback:
+            scrape_window_show_callback()
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -287,10 +303,55 @@ def _schedule_next() -> None:
     if scrape_interval_minutes <= 0:
         logger.info('Auto-scrape disabled (interval=0)')
         return
-    _timer = threading.Timer(scrape_interval_minutes * 60, _do_scrape)
+    _timer = threading.Timer(scrape_interval_minutes * 60,
+                             lambda: _enqueue_scrape())
     _timer.daemon = True
     _timer.start()
     logger.info(f'Next auto-scrape in {scrape_interval_minutes} min')
+
+
+# Iter. 36: Scrape-Queue fuer sequenzielle Verarbeitung paralleler Klicks.
+# Vorher hat ein zweiter Scrape-Klick (z.B. Gruppe B waehrend Gruppe A laeuft)
+# ein "already_running" zurueckgegeben. Jetzt landet er in der Queue und
+# wird automatisch gestartet sobald der laufende Scrape fertig ist.
+_scrape_queue: _queue_mod.Queue = _queue_mod.Queue()
+_scrape_worker_started = False
+_scrape_worker_lock = threading.Lock()
+
+
+def _scrape_worker() -> None:
+    while True:
+        task = _scrape_queue.get()
+        try:
+            _do_scrape(**task)
+        except Exception as e:
+            logger.exception('Scrape-Queue task failed: %s', e)
+        finally:
+            _scrape_queue.task_done()
+
+
+def _ensure_scrape_worker() -> None:
+    global _scrape_worker_started
+    with _scrape_worker_lock:
+        if _scrape_worker_started:
+            return
+        _scrape_worker_started = True
+        threading.Thread(target=_scrape_worker,
+                         name='scrape-queue-worker', daemon=True).start()
+
+
+def _enqueue_scrape(**kwargs) -> dict:
+    """Stelle einen Scrape-Task in die Queue. Gibt status+queue_position zurueck.
+    status='started' wenn nichts laeuft und Queue leer, sonst 'queued'.
+    """
+    _ensure_scrape_worker()
+    qsize_before = _scrape_queue.qsize()
+    running = bool(scraper.STATUS.get('scraping'))
+    _scrape_queue.put(kwargs)
+    if running or qsize_before > 0:
+        position = qsize_before + (1 if running else 0)
+        return {'status': 'queued', 'queue_position': position}
+    return {'status': 'started', 'queue_position': 0}
 
 
 def _refresh_one_auction(deal: dict) -> bool:
@@ -607,23 +668,17 @@ def api_save_filter_settings():
 
 @app.route('/api/scrape', methods=['POST'])
 def api_scrape():
-    if scraper.STATUS['scraping']:
-        return jsonify({'status': 'already_running'})
-    t = threading.Thread(target=_do_scrape, daemon=True)
-    t.start()
-    return jsonify({'status': 'started'})
+    return jsonify(_enqueue_scrape())
 
 
 @app.route('/api/scrape/<int:target_id>', methods=['POST'])
 def api_scrape_target(target_id: int):
-    if scraper.STATUS['scraping']:
-        return jsonify({'status': 'already_running'})
     targets = [t for t in db.get_targets() if t['id'] == target_id]
     if not targets:
         return jsonify({'error': 'target not found'}), 404
-    t = threading.Thread(target=_do_scrape, args=(targets[0],), daemon=True)
-    t.start()
-    return jsonify({'status': 'started', 'target': targets[0]['name']})
+    result = _enqueue_scrape(target=targets[0])
+    result['target'] = targets[0]['name']
+    return jsonify(result)
 
 
 @app.route('/api/scrape/group/<path:group_name>', methods=['POST'])
@@ -632,29 +687,60 @@ def api_scrape_group(group_name: str):
 
     Saves the user from clicking "Aktualisieren" on each product card in a
     group separately (Felix: "ich muss immer einzelne produkte aktualisieren").
+    Iter. 36: laeuft schon was, wird die Gruppe enqueued statt abgewiesen.
     """
-    if scraper.STATUS['scraping']:
-        return jsonify({'status': 'already_running'})
     group_targets = [t for t in db.get_targets()
                      if t.get('active') and (t.get('group_name') or '') == group_name]
     if not group_targets:
         return jsonify({'error': f'Keine aktiven Targets in Gruppe „{group_name}"'}), 404
-    th = threading.Thread(
-        target=_do_scrape,
-        kwargs={'targets': group_targets, 'label': f'group: {group_name}'},
-        daemon=True,
-    )
-    th.start()
-    return jsonify({
-        'status':  'started',
-        'group':   group_name,
-        'targets': [t['name'] for t in group_targets],
-    })
+    result = _enqueue_scrape(targets=group_targets, label=f'group: {group_name}')
+    result['group'] = group_name
+    result['targets'] = [t['name'] for t in group_targets]
+    return jsonify(result)
+
+
+def _compute_active_sites() -> set:
+    """Iter. 36: Welche Site-Namen sind in der Vereinigung aller aktiven Target-
+    sources? Sites die in KEINEM aktiven Target zugelassen sind, zeigen wir
+    in der UI gar nicht erst — sonst wirken sie wie '0 Treffer'.
+
+    Targets mit leerer sources-Liste = keine Restriction = alle Sites erlaubt.
+    """
+    try:
+        targets = db.get_targets()
+    except Exception:
+        return set()
+    active = [t for t in targets if t.get('active')]
+    if not active:
+        return set()
+    # Wenn auch nur ein Target unrestricted ist, sind alle Sites aktiv.
+    if any(not t.get('sources') for t in active):
+        return set(scraper.STATUS.get('sites', {}).keys())
+    union = set()
+    for t in active:
+        union.update(t.get('sources') or [])
+    # Apple-UVP wird unconditional fuer alle Targets gescrapt (Referenzpreise)
+    # und ist deshalb nicht Teil der per-Gruppe-Quellen-Filter-Logik.
+    union.add('Apple')
+    return union
 
 
 @app.route('/api/status')
 def api_status():
-    return jsonify({**scraper.STATUS, 'interval_minutes': scrape_interval_minutes})
+    # Iter. 36: jede /api/status-Antwort flaggt pro Site ob sie aktuell in einer
+    # Gruppen-Quellen-Liste enthalten ist. Frontend versteckt Sites mit
+    # eligible=false damit Felix keine "0 Treffer" sieht fuer Quellen die er
+    # bewusst nicht aktiviert hat.
+    active = _compute_active_sites()
+    sites_with_flag = {
+        name: {**info, 'eligible': name in active}
+        for name, info in scraper.STATUS.get('sites', {}).items()
+    }
+    return jsonify({
+        **scraper.STATUS,
+        'sites': sites_with_flag,
+        'interval_minutes': scrape_interval_minutes,
+    })
 
 
 @app.route('/api/stats')

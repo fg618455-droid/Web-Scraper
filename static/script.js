@@ -1071,7 +1071,9 @@ async function scrapeTarget(id, btn) {
   if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
   try {
     const res = await api(`/api/scrape/${id}`, { method: 'POST' });
-    if (res.status === 'already_running') {
+    if (res.status === 'queued') {
+      toast(`„${res.target}" wartet (Position ${res.queue_position})…`, 'info');
+    } else if (res.status === 'already_running') {
       toast('Scraping läuft bereits…', 'warning');
     } else {
       toast(`„${res.target}" wird gescrapt…`, 'info');
@@ -1095,7 +1097,10 @@ async function scrapeGroup(groupName, btn) {
       `/api/scrape/group/${encodeURIComponent(groupName)}`,
       { method: 'POST' },
     );
-    if (res.status === 'already_running') {
+    if (res.status === 'queued') {
+      const n = (res.targets || []).length;
+      toast(`Gruppe „${groupName}" wartet (${n} Produkt${n === 1 ? '' : 'e'}, Position ${res.queue_position})…`, 'info');
+    } else if (res.status === 'already_running') {
       toast('Scraping läuft bereits…', 'warning');
     } else {
       const n = (res.targets || []).length;
@@ -1127,12 +1132,15 @@ async function triggerScrape() {
   overlay.classList.remove('hidden', 'minimized');   // Iter. 26: bei Start volle Ansicht
   try {
     const res = await api('/api/scrape', { method: 'POST' });
-    if (res.status === 'already_running') {
+    if (res.status === 'queued') {
+      toast(`Globaler Scrape wartet (Position ${res.queue_position})…`, 'info');
+      overlay.classList.add('hidden');
+    } else if (res.status === 'already_running') {
       toast('Scraping läuft bereits…', 'warning');
     } else {
       toast('Scraping gestartet', 'info');
+      pollUntilDone();
     }
-    pollUntilDone();
   } catch (err) {
     toast('Fehler: ' + (err?.message ?? 'unbekannt'), 'error');
     overlay.classList.add('hidden');
@@ -1188,10 +1196,35 @@ function _ensureScrapePill(siteName) {
 
 function updateScrapeProgress(s) {
   if (!s.sites) return;
+
+  // Iter. 36: Live-Progress-Banner — zeigt aktuell laufende Site/Target/Gruppe.
+  const curBox = document.getElementById('scrape-current');
+  if (curBox) {
+    const c = s.current || {};
+    if (s.scraping && (c.site || c.target)) {
+      const kwEl    = document.getElementById('scrape-current-keyword');
+      const siteEl  = document.getElementById('scrape-current-site');
+      const grpEl   = document.getElementById('scrape-current-group');
+      if (kwEl)   kwEl.textContent   = c.keyword || c.target || '…';
+      if (siteEl) siteEl.textContent = c.site || '…';
+      if (grpEl)  grpEl.textContent  = c.group ? `· Gruppe „${c.group}"` : '';
+      curBox.classList.remove('hidden');
+    } else {
+      curBox.classList.add('hidden');
+    }
+  }
+
   for (const [site, info] of Object.entries(s.sites)) {
+    // Iter. 36: Sites die in keiner Gruppen-Quellen-Liste sind oder
+    // explizit als 'skipped' markiert wurden - aus der Pillen-Liste raus.
+    if (info.eligible === false || info.status === 'skipped') {
+      const existing = document.querySelector(`#scrape-progress [data-site="${CSS.escape(site)}"]`);
+      if (existing) existing.classList.add('prog-skipped');
+      continue;
+    }
     const li = _ensureScrapePill(site);
     if (!li) continue;
-    li.classList.remove('prog-done', 'prog-err', 'prog-empty', 'prog-blocked');
+    li.classList.remove('prog-done', 'prog-err', 'prog-empty', 'prog-blocked', 'prog-skipped');
     const cnt = li.querySelector('.prog-count');
     if (info.status === 'ok') {
       li.classList.add('prog-done');
@@ -2375,6 +2408,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('add-target-btn').addEventListener('click', openAddModal);
   document.getElementById('scrape-btn').addEventListener('click', triggerScrape);
   document.getElementById('interval-input').addEventListener('change', saveInterval);
+
+  // Iter. 36: Klick auf Status-Pille oeffnet das Scrape-Status-Fenster
+  document.getElementById('status-pill')?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/scrape-window/show', { method: 'POST' });
+    } catch (e) { /* silent */ }
+  });
 
   // Iter. 26: Scrape-Overlay minimieren — Felix wollte waehrend des Scrapings
   // weiter mit der App arbeiten. Toggle via Header-Button, Click auf Backdrop
