@@ -1,6 +1,7 @@
 """
 Deal Scraper - Desktop App Entry Point
-Starts Flask in a background thread, then opens Edge/Chrome in app mode.
+Starts Flask in a background thread, opens a native PyWebView window
+(Edge-WebView2 backend), and keeps the app alive via the system tray.
 
 Run: python main.py
 """
@@ -269,23 +270,124 @@ def check_updates_and_prompt():
         pass
 
 
-def main():
-    # Iter. 29: Single-Instance-Lock. Wenn eine andere Instanz schon laeuft,
-    # nur den Browser auf die existierende Instanz oeffnen und Exit.
-    if _another_instance_running():
-        print(f"DealScraper laeuft bereits auf {URL} — oeffne nur das Fenster.")
-        browser = _find_browser()
-        if browser:
-            # Iter. 31 fix: --start-fullscreen verdeckte die Taskleiste und
-            # damit das Tray-Icon. --start-maximized allein liefert ein
-            # randloses grosses Fenster, ohne die Taskleiste zu killen.
+# ── Iter. 34: PyWebView-Lifecycle ────────────────────────────────────────────
+#
+# Architektur:
+#   * Flask laeuft im daemon-thread (wie bisher)
+#   * Tray laeuft in EIGENEM thread via Icon.run() — vorher main-thread, jetzt
+#     worker-thread, weil pywebview den main-thread fuer sich braucht
+#   * pywebview.start() blockt den main-thread bis alle windows zerstoert sind
+#   * Window-X-Klick: closing-handler ruft window.hide() und cancelt das Close.
+#     So lebt die App im Tray weiter ohne den webview-Backend zu killen.
+#   * Tray "Beenden": setzt _really_quit, ruft window.destroy() — closing-handler
+#     erlaubt dann das echte Close, webview.start() returnt, main() exit'd.
+
+_really_quit = threading.Event()
+_windows = {}  # 'main' | 'scrape' -> webview.Window
+
+
+def _make_closing_handler(window):
+    """Returnt einen Handler der hide() statt destroy() macht — ausser
+    _really_quit ist gesetzt (Tray-Beenden-Pfad).
+    """
+    def handler():
+        if _really_quit.is_set():
+            return True  # erlaube echtes close
+        try:
+            window.hide()
+        except Exception:
+            pass
+        return False  # cancel close
+    return handler
+
+
+def _show_main_window():
+    win = _windows.get('main')
+    if win:
+        try:
+            win.show()
+        except Exception as e:
+            print(f"[webview] show main failed: {e}")
+
+
+def _show_scrape_window():
+    win = _windows.get('scrape')
+    if win:
+        try:
+            win.show()
+        except Exception as e:
+            print(f"[webview] show scrape failed: {e}")
+
+
+def _trigger_scrape_via_http():
+    """Tray-Callback fuer 'Jetzt scrapen' — POST /api/scrape im Hintergrund."""
+    def _post():
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f'{URL}/api/scrape', method='POST',
+                headers={'Content-Type': 'application/json'}, data=b'{}',
+            )
+            urllib.request.urlopen(req, timeout=5).read()
+        except Exception:
+            pass
+    threading.Thread(target=_post, daemon=True).start()
+
+
+def _shutdown_persistent_quiet():
+    try:
+        import scraper
+        scraper._shutdown_persistent()
+    except Exception:
+        pass
+
+
+def _tray_quit():
+    """Tray-'Beenden'-Callback. Schliesst Persistent-Chromium und destroyt
+    alle pywebview-Windows — danach returnt webview.start() im main-thread.
+    """
+    _really_quit.set()
+    _shutdown_persistent_quiet()
+    try:
+        import webview as _wv
+        for w in list(_wv.windows):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _chrome_app_fallback():
+    """Letzte Rueckfallebene falls pywebview nicht startet (zb WebView2 fehlt
+    auf Win10-LTSC). Vorher gemachte Aufrufe: Chrome --app=URL."""
+    browser = _find_browser()
+    if browser:
+        try:
             subprocess.Popen([
                 browser,
-                "--app={}".format(URL),
+                f"--app={URL}",
                 "--start-maximized",
                 "--disable-extensions",
             ])
-        else:
+            return
+        except Exception:
+            pass
+    webbrowser.open(URL)
+
+
+def main():
+    # Iter. 29/34: Single-Instance-Lock. Wenn eine andere Instanz schon laeuft,
+    # frag sie einfach ihr Fenster zu zeigen (HTTP-Endpunkt /api/window/show)
+    # und beende uns selbst.
+    if _another_instance_running():
+        print(f"DealScraper laeuft bereits auf {URL} — bitte die bestehende Instanz zeigen.")
+        try:
+            import urllib.request
+            urllib.request.urlopen(f"{URL}/api/window/show", timeout=2).read()
+        except Exception:
+            # Fallback: Default-Browser auf die URL
             webbrowser.open(URL)
         return
 
@@ -295,6 +397,7 @@ def main():
     flask_thread.start()
     _print_lan_urls()
 
+    # Warte bis Flask /api/health antwortet
     for _ in range(20):
         time.sleep(0.3)
         try:
@@ -304,48 +407,87 @@ def main():
         except Exception:
             pass
 
-    browser = _find_browser()
-    cdp_port = CONFIG.get("cdp_port", 9222)
-    if browser:
-        # Iter. 29: Chrome bekommt CDP-Port + Anti-Automation-Flag damit die
-        # App den User-Browser als eBay-Renderer benutzen kann (umgeht Akamai
-        # weil dieser Browser Felix' echte Login-Cookies + Browser-Fingerprint
-        # mitbringt). Siehe scraper.fetch_ebay_via_cdp.
-        subprocess.Popen([
-            browser,
-            "--app={}".format(URL),
-            "--start-maximized",
-            "--disable-extensions",
-            f"--remote-debugging-port={cdp_port}",
-            "--remote-allow-origins=*",
-            "--disable-blink-features=AutomationControlled",
-        ])
-        # Pfad fuer scraper.fetch_ebay_via_cdp bekannt machen
-        os.environ["DEALSCRAPER_CDP_PORT"] = str(cdp_port)
-    else:
-        webbrowser.open(URL)
-
-    # Iter. 31: System-Tray haelt den Prozess am Leben — wenn Felix das Chrome-
-    # Fenster zumacht laeuft die App im Hintergrund weiter (Background-Refresh,
-    # Geocode etc. ticken durch). Tray-Menu erlaubt erneutes Oeffnen, manuellen
-    # Scrape und sauberes Beenden inkl. Persistent-Chromium-Shutdown.
-    def _on_tray_quit():
-        try:
-            import scraper
-            scraper._shutdown_persistent()
-        except Exception:
-            pass
+    # Iter. 34: kein Chrome-Subprozess mehr. Iter. 31 Tray-Callbacks werden
+    # an pywebview-Window-Methoden gebunden statt subprocess.Popen([chrome]).
     try:
         from tray import AppTray
-        AppTray(URL, browser, cdp_port=cdp_port, on_quit=_on_tray_quit).run()
+        tray = AppTray(
+            URL,
+            on_show_main=_show_main_window,
+            on_show_scrape=_show_scrape_window,
+            on_scrape=_trigger_scrape_via_http,
+            on_quit=_tray_quit,
+        )
+        tray_thread = threading.Thread(target=tray.run, daemon=True, name='AppTray')
+        tray_thread.start()
     except Exception as e:
-        # Fallback wenn pystray fehlt / krasht: alte passive Schleife
-        print(f"[Tray] Start fehlgeschlagen ({e}) — bleibe passiv im Hintergrund")
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            pass
+        print(f"[Tray] Start fehlgeschlagen ({e}) — App laeuft ohne Tray weiter.")
+        tray = None
+
+    # Module-Globals so setzen dass app.py /api/window/show drauf zugreifen kann
+    import app as _app_module
+    _app_module.window_show_callback = _show_main_window
+
+    # PyWebView-Windows aufsetzen + starten (blockt bis alle destroyed)
+    try:
+        import webview
+    except Exception as e:
+        print(f"[webview] Import failed ({e}) — Chrome-Fallback.")
+        _chrome_app_fallback()
+        # Tray haelt prozess am Leben
+        while not _really_quit.is_set():
+            time.sleep(1)
+        return
+
+    icon_path = os.path.join(BASE_DIR, "icon.ico")
+    if not os.path.isfile(icon_path):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            cand = os.path.join(meipass, "icon.ico")
+            if os.path.isfile(cand):
+                icon_path = cand
+
+    main_win = webview.create_window(
+        'Deal Tracker',
+        URL,
+        width=1400,
+        height=900,
+        min_size=(900, 600),
+        background_color='#0b1220',
+        text_select=True,
+    )
+    scrape_win = webview.create_window(
+        'Deal Tracker — Scrape',
+        f'{URL}/scrape-window',
+        width=380,
+        height=540,
+        min_size=(320, 420),
+        background_color='#0b1220',
+        hidden=True,
+        on_top=True,
+    )
+    _windows['main'] = main_win
+    _windows['scrape'] = scrape_win
+
+    # closing-Events: hide statt destroy ausser beim echten Beenden
+    main_win.events.closing += _make_closing_handler(main_win)
+    scrape_win.events.closing += _make_closing_handler(scrape_win)
+
+    try:
+        webview.start(
+            icon=icon_path if os.path.isfile(icon_path) else None,
+            debug=False,
+            private_mode=False,  # localStorage etc. persistieren
+        )
+    except Exception as e:
+        print(f"[webview] start failed ({e}) — Chrome-Fallback.")
+        _chrome_app_fallback()
+        while not _really_quit.is_set():
+            time.sleep(1)
+        return
+
+    # webview.start() returnt nur wenn alle Windows zerstoert sind. Aufraeumen.
+    _shutdown_persistent_quiet()
 
 
 if __name__ == "__main__":

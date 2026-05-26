@@ -6,3 +6,4 @@ playwright>=1.44
 plyer>=2.1
 pillow>=10.0
 pystray>=0.19
+pywebview>=5.0

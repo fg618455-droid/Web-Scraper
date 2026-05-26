@@ -21,12 +21,19 @@ a = Analysis(
     # Iter. 31: pystray nutzt platform-spezifische Backends die PyInstaller
     # nicht automatisch findet. Explizit aufnehmen damit der frozen Build
     # das Tray-Icon zeigen kann.
+    # Iter. 34: pywebview-edgechromium braucht pythonnet/clr_loader plus die
+    # platform-Module. Sonst kommt zur Laufzeit "No module named webview...".
     hiddenimports=[
         'pystray._win32',
         'pystray._base',
         'PIL.Image',
         'PIL.ImageDraw',
         'plyer.platforms.win.notification',
+        'webview',
+        'webview.platforms.edgechromium',
+        'webview.platforms.winforms',
+        'clr_loader',
+        'pythonnet',
     ],
     hookspath=[],
     hooksconfig={},

@@ -1,22 +1,23 @@
-"""Iter. 31: System-Tray + Detach.
+"""Iter. 31/34: System-Tray.
 
-Hintergrund: bisher hielt main.py den Prozess via `while True: sleep(1)` am
-Leben. Wenn Felix das Chrome-`--app`-Fenster schloss, blieb die App zwar
-laufen, aber er hatte keinen sichtbaren Indikator mehr und auch keinen Weg
-sie sauber wiederzubekommen ausser ueber Task-Manager. Tray loest beides:
+Iter. 31 hat den Tray eingefuehrt — damals startete er Chrome `--app=...`
+Subprozesse fuer die UI-Fenster. Iter. 34 ersetzt das durch pywebview:
+der Tray ruft jetzt Callbacks die das main-thread-eigene pywebview-Window
+zeigen/verstecken.
 
-  * Icon im Windows-Notification-Area zeigt dass die App laeuft
-  * Menue: Anzeigen / Scrape jetzt / Scrape-Fenster / Beenden
-  * Doppelklick aufs Icon = Anzeigen (neues Chrome --app=...)
-  * Beenden = sauberer Shutdown inkl. Persistent-Chromium
+Verantwortlichkeiten:
+  * Icon im Notification-Area sichtbar halten
+  * Menue: Anzeigen / Scrape-Fenster / Jetzt scrapen / Beenden
+  * Klick-Callbacks an main.py weiterreichen — Window-Lifecycle gehoert
+    nicht hier rein, sondern in den main-thread der pywebview kontrolliert.
 
-Plyer-Toast am Scrape-Ende wird aus app._do_scrape gefeuert; der Tray ist
-das Heimat des Icons, nicht des Toast-Triggers.
+Lifecycle: AppTray.run() wird in Iter. 34 im EIGENEN thread aufgerufen
+(vorher main-thread). pystray-Win32-Backend funktioniert robust in jedem
+thread, weil es eine eigene Win32-Message-Loop oeffnet.
 """
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 import threading
 import urllib.request
@@ -39,9 +40,9 @@ def _icon_path() -> str | None:
 
 
 def _load_icon_image():
-    """Laedt das Tray-Icon als PIL.Image. Fallback: kleines transparentes
-    Quadrat — sorgt zumindest fuer ein klickbares Tray-Symbol falls icon.ico
-    wegen Build-Pech nicht im Bundle landet.
+    """Laedt das Tray-Icon als PIL.Image. Fallback: kleines blaues Quadrat —
+    sorgt zumindest fuer ein klickbares Tray-Symbol falls icon.ico wegen
+    Build-Pech nicht im Bundle landet.
     """
     try:
         from PIL import Image
@@ -59,80 +60,65 @@ def _load_icon_image():
 class AppTray:
     """System-Tray-Controller.
 
-    Erwartet:
-      url:              Basis-URL der laufenden Flask-Instanz (http://127.0.0.1:5001)
-      browser_path:     Pfad zur Chrome/Edge-Binary (None = webbrowser-Fallback)
-      cdp_port:         Optionaler Debug-Port fuer Chrome --app
-      on_quit:          Optionaler Callback der vor Process-Exit laeuft
-                        (z.B. Persistent-Chromium schliessen).
+    Erwartet Callbacks die im main-thread implementiert sind (pywebview-
+    Window-Operationen). Falls ein Callback None ist, faellt der Tray
+    auf HTTP/Webbrowser-Fallbacks zurueck.
+
+      url:              Basis-URL der laufenden Flask-Instanz
+      on_show_main:     Callback: bringt das Haupt-UI-Fenster nach vorn
+      on_show_scrape:   Callback: zeigt das Scrape-Status-Fenster
+      on_scrape:        Callback: triggert /api/scrape (default: HTTP-POST)
+      on_quit:          Callback: schliesst alles inkl. Persistent-Chromium
     """
 
-    def __init__(self, url: str, browser_path: str | None,
-                 cdp_port: int | None = None, on_quit=None):
+    def __init__(self, url: str,
+                 on_show_main=None, on_show_scrape=None,
+                 on_scrape=None, on_quit=None):
         self.url = url.rstrip('/')
-        self.browser_path = browser_path
-        self.cdp_port = cdp_port
+        self.on_show_main = on_show_main
+        self.on_show_scrape = on_show_scrape
+        self.on_scrape = on_scrape
         self.on_quit = on_quit
         self._icon = None
         self._quitting = False
 
     # ── Aktionen ────────────────────────────────────────────────────────────
 
-    def _chrome_args(self, target_url: str, extra: list[str] | None = None) -> list[str]:
-        args = [
-            self.browser_path,
-            f'--app={target_url}',
-            '--disable-extensions',
-        ]
-        if self.cdp_port:
-            args.append(f'--remote-debugging-port={self.cdp_port}')
-            args.append('--remote-allow-origins=*')
-            args.append('--disable-blink-features=AutomationControlled')
-        if extra:
-            args.extend(extra)
-        return args
-
     def _open_main_window(self, *_):
-        """Oeffnet das Haupt-UI in einem neuen Chrome --app Fenster.
-        Wenn schon eines auf ist macht Chrome eh ein zweites - kein Problem.
-        """
-        if not self.browser_path:
-            import webbrowser
-            webbrowser.open(self.url)
-            return
+        if self.on_show_main:
+            try:
+                self.on_show_main()
+                return
+            except Exception as e:
+                print(f"[Tray] on_show_main failed: {e}")
+        # Fallback wenn kein pywebview-Callback: Default-Browser
         try:
-            subprocess.Popen(self._chrome_args(
-                self.url,
-                ['--start-maximized'],
-            ))
-        except Exception:
             import webbrowser
             webbrowser.open(self.url)
+        except Exception:
+            pass
 
     def _open_scrape_window(self, *_):
-        """Oeffnet das Mini-Scrape-Fenster (380x540) das den Scrape-Status
-        live anzeigt. Praktisch wenn Felix die App im Tray hat aber zusehen
-        will was gerade lauft.
-        """
-        target = f'{self.url}/scrape-window'
-        if not self.browser_path:
-            import webbrowser
-            webbrowser.open(target)
-            return
+        if self.on_show_scrape:
+            try:
+                self.on_show_scrape()
+                return
+            except Exception as e:
+                print(f"[Tray] on_show_scrape failed: {e}")
         try:
-            subprocess.Popen(self._chrome_args(
-                target,
-                ['--window-size=380,540', '--window-position=80,80'],
-            ))
-        except Exception:
             import webbrowser
-            webbrowser.open(target)
+            webbrowser.open(f'{self.url}/scrape-window')
+        except Exception:
+            pass
 
     def _trigger_scrape(self, *_):
-        """Loest einen globalen Scrape aus indem POST /api/scrape gehit wird.
-        Background thread damit das Tray-Menu nicht blockiert (Scrape kann
-        Sekunden brauchen, sogar nur fuer den Start-Lock).
-        """
+        if self.on_scrape:
+            try:
+                self.on_scrape()
+                return
+            except Exception as e:
+                print(f"[Tray] on_scrape failed: {e}")
+        # Default: HTTP-POST /api/scrape im Hintergrund
         def _post():
             try:
                 req = urllib.request.Request(
@@ -161,14 +147,12 @@ class AppTray:
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        """Blockt bis der User 'Beenden' klickt. Soll im Main-Thread aufgerufen
-        werden — pystray-Win32 funktioniert robuster mit eigener Message-Loop
-        im Owner-Thread.
+        """Blockt bis User 'Beenden' klickt. Iter. 34: laeuft in worker-thread
+        (nicht mehr main-thread) — pywebview braucht main-thread fuer sich.
         """
         try:
             import pystray
         except ImportError:
-            # Tray nicht verfuegbar - fallback auf altes Verhalten
             print('[Tray] pystray nicht installiert, falle auf passive Endlos-Schleife zurueck')
             import time
             try:
@@ -190,8 +174,7 @@ class AppTray:
         self._icon = pystray.Icon(
             'DealScraper',
             image,
-            'Deal Scraper',
+            'Deal Tracker',
             menu,
         )
-        # icon.run() blockt — perfekt fuer Main-Thread
         self._icon.run()

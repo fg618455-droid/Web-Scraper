@@ -83,6 +83,32 @@ def api_health():
     return jsonify({'ok': True, 'ts': datetime.now().isoformat()})
 
 
+# Iter. 34: main.py setzt das auf _show_main_window — wird vom Single-Instance-
+# Pfad genutzt um die laufende App in den Vordergrund zu holen.
+window_show_callback = None
+
+
+@app.route('/api/window/show', methods=['GET', 'POST'])
+def api_window_show():
+    """Iter. 34: bringt das Haupt-pywebview-Fenster nach vorn. Wird vom
+    Single-Instance-Lock einer zweiten DealScraper-Instanz genutzt.
+    """
+    try:
+        if window_show_callback:
+            window_show_callback()
+        else:
+            # Fallback: webview-API direkt
+            try:
+                import webview
+                if webview.windows:
+                    webview.windows[0].show()
+            except Exception:
+                pass
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.route('/api/debug/scraper-state')
 def api_debug_scraper_state():
     """Iter. 31: Beweis-Endpoint — sagt welcher Akamai-Bypass-Pfad gerade live ist.
