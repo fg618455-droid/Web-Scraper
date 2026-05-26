@@ -194,11 +194,17 @@ def download_and_update(release_data, latest_version=None):
         helper = _write_helper(new_root, install_dir, exe_name)
         print(f"[Updater] Helper geschrieben: {helper}")
 
+        # v33-Fix: alte Variante "cmd /c start /MIN ..." zeigte ein
+        # minimiertes-aber-sichtbares Konsolen-Fenster fuer die Dauer des
+        # robocopy-Helpers. CREATE_NO_WINDOW unterdrueckt das komplett —
+        # der Update-Flow ist jetzt visuell unsichtbar bis die neue .exe
+        # ihr Fenster oeffnet.
+        CREATE_NO_WINDOW = 0x08000000
         subprocess.Popen(
-            ["cmd.exe", "/c", "start", "", "/MIN", helper],
+            ["cmd.exe", "/c", helper],
             close_fds=True,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "DETACHED_PROCESS", 0),
+                | CREATE_NO_WINDOW,
         )
         # Aktuelle .exe-Process killen, Helper macht den Rest.
         os._exit(0)
