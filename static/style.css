@@ -2552,3 +2552,94 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
 .btn-link:hover {
   color: #c4b5fd;
 }
+
+/* ═══ Iter. 35 Stufe B: Custom App Title-Bar (frameless window) ═════ */
+.app-titlebar {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  height: 36px;
+  flex-shrink: 0;
+  background: linear-gradient(180deg, rgba(5, 6, 15, 0.92) 0%, rgba(5, 6, 15, 0.74) 100%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(18px) saturate(160%);
+  border-bottom: 1px solid rgba(129, 140, 248, 0.10);
+  z-index: 200;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.app-titlebar-drag {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  overflow: hidden;
+  cursor: grab;
+}
+.app-titlebar-drag:active { cursor: grabbing; }
+.app-titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: rgba(226, 232, 240, 0.78);
+  pointer-events: none; /* events bubbeln zur drag-region; sonst frisst SVG/IMG den mousedown */
+}
+.app-titlebar-mark {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: var(--accent-grad);
+  color: white;
+  box-shadow: 0 2px 8px rgba(129, 140, 248, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  flex-shrink: 0;
+}
+.app-titlebar-mark svg {
+  width: 11px;
+  height: 11px;
+}
+.app-titlebar-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-titlebar-controls {
+  display: flex;
+  flex-shrink: 0;
+}
+.app-titlebar-btn {
+  width: 46px;
+  height: 36px;
+  border: 0;
+  background: transparent;
+  color: rgba(226, 232, 240, 0.72);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  transition: background 120ms ease, color 120ms ease;
+}
+.app-titlebar-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+.app-titlebar-btn:active {
+  background: rgba(255, 255, 255, 0.10);
+}
+.app-titlebar-btn.app-titlebar-close:hover {
+  background: #e81123;
+  color: #fff;
+}
+.app-titlebar-btn svg {
+  width: 10px;
+  height: 10px;
+}
+/* Maximize/Restore Icon-Toggle: nur eines der zwei SVGs gleichzeitig sichtbar */
+.app-titlebar-max .ico-restore { display: none; }
+.app-titlebar-max.is-maximized .ico-max { display: none; }
+.app-titlebar-max.is-maximized .ico-restore { display: block; }

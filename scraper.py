@@ -33,6 +33,24 @@ _SITE_NAMES = [
     'Refurbed',
     'Idealo', 'notebooksbilliger', 'Cyberport',
     'Amazon', 'Kaufland', 'Backmarket',
+    # Iter. 36 (2026-05-26): 40 weitere Sites aus websitenliste.md.
+    # Generic Parser (_make_generic_parser) mit gaengigen Selektor-Sets.
+    # Anti-Bot-blockierte Sites werden ehrlich als status='blocked' reportet.
+    # ── Tech / Elektronik (9) ─────────────────────────────────────
+    'MediaMarkt', 'Saturn', 'Galaxus', 'Coolblue', 'Computeruniverse',
+    'Expert', 'Euronics', 'ReBuy', 'Jacob',
+    # ── Uhren & Accessoires (14) ─────────────────────────────────
+    'Christ', 'Chrono24', 'Uhrzeit.org', 'Uhrinstinkt', 'Valmano',
+    'Brandfield', 'Watchshop', 'Chronext', 'Wardow', 'Fashionette',
+    'Kapten-Son', 'Fossil', 'Skagen', 'Liebeskind-Berlin',
+    # ── Parfuem & Beauty (14) ────────────────────────────────────
+    'Douglas', 'Flaconi', 'Notino', 'Parfumdreams', 'Sephora',
+    'Easycosmetic', 'Pieper', 'Lookfantastic', 'Beautywelt',
+    'Ludwigbeck', 'Basler-Beauty', 'Hagel-Shop', 'Shop-Apotheke',
+    'DocMorris',
+    # ── Marktplaetze & Trend-Shops (10, ohne Etsy/BestSecret) ────
+    'Zalando', 'AboutYou', 'Asos', 'Etsy', 'BestSecret',
+    'Veepee', 'Snipes', 'HHV', 'Breuninger', 'Baur', 'Lidl',
 ]
 
 # Per-site state field semantics:
@@ -52,6 +70,32 @@ STATUS = {
         for name in _SITE_NAMES
     },
 }
+
+
+def _load_last_scrape_from_db() -> None:
+    """Iter. 35: nach App-Restart STATUS['last_scrape'] aus der DB rekonstruieren.
+    Sonst zeigt die UI 'Noch nicht gescrapt' obwohl Deals da sind. Lese MAX
+    last_seen aus der deals-Tabelle — das ist der Zeitpunkt des juengsten Scrapes.
+    """
+    try:
+        import sqlite3
+        try:
+            from paths import resolve_user_file
+            db_path = resolve_user_file('deals.db')
+        except Exception:
+            import os
+            db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   'deals.db')
+        con = sqlite3.connect(db_path)
+        row = con.execute('SELECT MAX(last_seen) FROM deals').fetchone()
+        con.close()
+        if row and row[0]:
+            STATUS['last_scrape'] = row[0]
+    except Exception:
+        pass
+
+
+_load_last_scrape_from_db()
 
 HEADERS = {
     'User-Agent': (
@@ -3182,6 +3226,87 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
          2500,
          '[data-test="product-card"], article[data-product], [class*="ProductCard"], [class*="productcard"]'),
     ]
+
+    # ── Iter. 36: 40 weitere Shops aus websitenliste.md ─────────────
+    # Generic Selektor-Set + Wait-Selektor — _make_generic_parser hat eh
+    # JSON-LD + Microdata-Fallback wenn die CSS-Selektoren nichts liefern.
+    _generic_card_selectors = [
+        'article[data-product]', '[data-testid*="product"]', '[data-test*="product"]',
+        '[data-test="product-card"]', '[data-product-id]',
+        'article.product', '[class*="ProductCard"]', '[class*="productcard"]',
+        '[class*="product-card"]', '[class*="product-tile"]',
+        '[class*="ProductTile"]', '[class*="productBox"]', '[class*="product-box"]',
+        '[class*="product-item"]', '[class*="ProductItem"]',
+        '[class*="article-tile"]', '[class*="ArticleTile"]',
+    ]
+    _generic_wait_sel = ', '.join(_generic_card_selectors)
+
+    # (name, search_url_template, base_url, settle_ms)
+    _new_shops = [
+        # ── Tech / Elektronik ────────────────────────────────────────
+        ('MediaMarkt',       'https://www.mediamarkt.de/de/search.html?query={kw}',                    'https://www.mediamarkt.de',       3000),
+        ('Saturn',           'https://www.saturn.de/de/search.html?query={kw}',                        'https://www.saturn.de',           3000),
+        ('Galaxus',          'https://www.galaxus.de/de/search?q={kw}',                                'https://www.galaxus.de',          2500),
+        ('Coolblue',         'https://www.coolblue.de/zoeken?query={kw}',                              'https://www.coolblue.de',         2500),
+        ('Computeruniverse', 'https://www.computeruniverse.net/de/suche?searchtext={kw}',              'https://www.computeruniverse.net', 2500),
+        ('Expert',           'https://www.expert.de/shop/search.html?q={kw}',                          'https://www.expert.de',           2500),
+        ('Euronics',         'https://www.euronics.de/search?query={kw}',                              'https://www.euronics.de',         2500),
+        ('ReBuy',            'https://www.rebuy.de/kaufen/suche?keyword={kw}',                         'https://www.rebuy.de',            2500),
+        ('Jacob',            'https://www.jacob.de/suche/?q={kw}',                                     'https://www.jacob.de',            2500),
+        # ── Uhren & Accessoires ──────────────────────────────────────
+        ('Christ',           'https://www.christ.de/search/?q={kw}',                                   'https://www.christ.de',           2500),
+        ('Chrono24',         'https://www.chrono24.de/search/index.htm?query={kw}',                    'https://www.chrono24.de',         3000),
+        ('Uhrzeit.org',      'https://www.uhrzeit.org/?query={kw}',                                    'https://www.uhrzeit.org',         2500),
+        ('Uhrinstinkt',      'https://www.uhrinstinkt.de/search.html?query={kw}',                      'https://www.uhrinstinkt.de',      2500),
+        ('Valmano',          'https://www.valmano.de/search?q={kw}',                                   'https://www.valmano.de',          2500),
+        ('Brandfield',       'https://www.brandfield.de/search?q={kw}',                                'https://www.brandfield.de',       2500),
+        ('Watchshop',        'https://www.watchshop.com/search.html?q={kw}',                           'https://www.watchshop.com',       2500),
+        ('Chronext',         'https://www.chronext.com/de/search?query={kw}',                          'https://www.chronext.com',        2500),
+        ('Wardow',           'https://www.wardow.com/search?q={kw}',                                   'https://www.wardow.com',          2500),
+        ('Fashionette',      'https://www.fashionette.de/search?q={kw}',                               'https://www.fashionette.de',      2500),
+        ('Kapten-Son',       'https://www.kapten-son.com/de/search?q={kw}',                            'https://www.kapten-son.com',      2500),
+        ('Fossil',           'https://www.fossil.com/de-de/search/?q={kw}',                            'https://www.fossil.com',          2500),
+        ('Skagen',           'https://www.skagen.com/de-de/search/?q={kw}',                            'https://www.skagen.com',          2500),
+        ('Liebeskind-Berlin', 'https://www.liebeskind-berlin.com/search?q={kw}',                       'https://www.liebeskind-berlin.com', 2500),
+        # ── Parfuem & Beauty ─────────────────────────────────────────
+        ('Douglas',          'https://www.douglas.de/de/search.html?q={kw}',                           'https://www.douglas.de',          3000),
+        ('Flaconi',          'https://www.flaconi.de/search/?text={kw}',                               'https://www.flaconi.de',          2500),
+        ('Notino',           'https://www.notino.de/search/?q={kw}',                                   'https://www.notino.de',           2500),
+        ('Parfumdreams',     'https://www.parfumdreams.de/search?q={kw}',                              'https://www.parfumdreams.de',     2500),
+        ('Sephora',          'https://www.sephora.de/de/search?q={kw}',                                'https://www.sephora.de',          2500),
+        ('Easycosmetic',     'https://www.easycosmetic.de/search?q={kw}',                              'https://www.easycosmetic.de',     2500),
+        ('Pieper',           'https://www.parfuemerie-pieper.de/search?q={kw}',                        'https://www.parfuemerie-pieper.de', 2500),
+        ('Lookfantastic',    'https://www.lookfantastic.de/elysium.search?search={kw}',                'https://www.lookfantastic.de',    2500),
+        ('Beautywelt',       'https://www.beautywelt.de/search?query={kw}',                            'https://www.beautywelt.de',       2500),
+        ('Ludwigbeck',       'https://www.ludwigbeck.de/search?q={kw}',                                'https://www.ludwigbeck.de',       2500),
+        ('Basler-Beauty',    'https://www.basler-beauty.de/search?q={kw}',                             'https://www.basler-beauty.de',    2500),
+        ('Hagel-Shop',       'https://www.hagel-shop.de/search?q={kw}',                                'https://www.hagel-shop.de',       2500),
+        ('Shop-Apotheke',    'https://www.shop-apotheke.com/search/?q={kw}',                           'https://www.shop-apotheke.com',   2500),
+        ('DocMorris',        'https://www.docmorris.de/search?text={kw}',                              'https://www.docmorris.de',        2500),
+        # ── Marktplaetze & Trend-Shops ───────────────────────────────
+        ('Zalando',          'https://www.zalando.de/catalog/?q={kw}',                                 'https://www.zalando.de',          2500),
+        ('AboutYou',         'https://www.aboutyou.de/suche?term={kw}',                                'https://www.aboutyou.de',         2500),
+        ('Asos',             'https://www.asos.com/de/search/?q={kw}',                                 'https://www.asos.com',            2500),
+        ('Etsy',             'https://www.etsy.com/de/search?q={kw}',                                  'https://www.etsy.com',            2500),
+        ('BestSecret',       'https://www.bestsecret.com/search?text={kw}',                            'https://www.bestsecret.com',      2500),
+        ('Veepee',           'https://secure.de.veepee.com/Search/Search.aspx?searchText={kw}',        'https://secure.de.veepee.com',    2500),
+        ('Snipes',           'https://www.snipes.com/c/search?q={kw}',                                 'https://www.snipes.com',          2500),
+        ('HHV',              'https://www.hhv.com/de/search?keywords={kw}',                            'https://www.hhv.com',             2500),
+        ('Breuninger',       'https://www.breuninger.com/de/search/?searchTerm={kw}',                  'https://www.breuninger.com',      2500),
+        ('Baur',             'https://www.baur.de/suche/?q={kw}',                                      'https://www.baur.de',             2500),
+        ('Lidl',             'https://www.lidl.de/q/query/{kw}',                                       'https://www.lidl.de',             2500),
+    ]
+
+    for _name, _tmpl, _base, _settle in _new_shops:
+        # default-arg trick um _tmpl / _base je Iteration einzufrieren
+        # (sonst captured Late-Binding ueberschreibt alle Lambdas auf den letzten Wert)
+        configs.append((
+            _name,
+            (lambda kw, t=_tmpl: t.format(kw=kw.replace(' ', '+'))),
+            _make_generic_parser(_name, _generic_card_selectors, _base),
+            _settle,
+            _generic_wait_sel,
+        ))
 
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout

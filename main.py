@@ -285,6 +285,262 @@ def check_updates_and_prompt():
 _really_quit = threading.Event()
 _windows = {}  # 'main' | 'scrape' -> webview.Window
 
+# Iter. 35 Stufe A: DWM Dark Title-Bar.
+# Edge-WebView2 ignoriert <meta name="theme-color"> — die Windows-Title-Bar
+# bleibt OS-Default-grau. Workaround: Desktop Window Manager API
+# DwmSetWindowAttribute mit DWMWA_USE_IMMERSIVE_DARK_MODE (20 = Win10 20H1+/Win11,
+# 19 = pre-20H1 fallback). Funktioniert unabhaengig vom System-Theme.
+_WINDOW_TITLES = ('Deal Tracker', 'Deal Tracker — Scrape')
+
+
+def _set_dark_title_bar(hwnd) -> bool:
+    """Faerbt die Title-Bar des Fensters dunkel. Returnt True bei Erfolg."""
+    if not hwnd:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        value = ctypes.c_int(1)
+        dwmapi = ctypes.windll.dwmapi
+        for attr in (20, 19):  # IMMERSIVE_DARK_MODE / _OLD
+            hr = dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint(attr),
+                ctypes.byref(value),
+                ctypes.sizeof(value),
+            )
+            if hr == 0:
+                return True
+    except Exception as e:
+        print(f"[DWM] dark title bar failed: {e}")
+    return False
+
+
+def _find_hwnd_by_title(title: str) -> int:
+    try:
+        import ctypes
+        ctypes.windll.user32.FindWindowW.restype = ctypes.c_void_p
+        hwnd = ctypes.windll.user32.FindWindowW(None, title)
+        return int(hwnd) if hwnd else 0
+    except Exception:
+        return 0
+
+
+# Iter. 35 Stufe B: Taskbar-Icon-Fix.
+# Im Source-Mode (python.exe) zeigt die Taskleiste das generische Python-Icon
+# weil Windows den Prozess der python.exe zuordnet. Zwei Win32-Calls noetig:
+#   1. SetCurrentProcessExplicitAppUserModelID — separate Taskbar-Gruppe
+#   2. WM_SETICON pro HWND — eigentliches Icon (ICON_SMALL fuer Taskbar)
+# Im frozen Build (DealScraper.exe) hat die exe schon das richtige Icon, der
+# Code schadet aber nicht.
+_APP_USER_MODEL_ID = "fg618455.DealTracker.App"
+
+
+def _set_app_user_model_id():
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            _APP_USER_MODEL_ID
+        )
+    except Exception as e:
+        print(f"[Taskbar] AppUserModelID failed: {e}")
+
+
+def _set_window_icon(hwnd: int, ico_path: str) -> bool:
+    if not hwnd or not ico_path or not os.path.isfile(ico_path):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        LR_LOADFROMFILE = 0x00000010
+        LR_DEFAULTSIZE = 0x00000040
+        IMAGE_ICON = 1
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+        user32 = ctypes.windll.user32
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.SendMessageW.restype = ctypes.c_void_p
+        h_icon = user32.LoadImageW(
+            None, ico_path, IMAGE_ICON, 0, 0,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        )
+        if not h_icon:
+            return False
+        user32.SendMessageW(wintypes.HWND(hwnd), WM_SETICON, ICON_BIG, ctypes.c_void_p(h_icon))
+        user32.SendMessageW(wintypes.HWND(hwnd), WM_SETICON, ICON_SMALL, ctypes.c_void_p(h_icon))
+        return True
+    except Exception as e:
+        print(f"[Taskbar] WM_SETICON failed: {e}")
+        return False
+
+
+def _apply_dark_title_bars():
+    """Wird von webview.start(func=...) im worker-thread aufgerufen sobald die
+    GUI-Schleife laeuft. Sucht beide Fenster per Title und setzt:
+      * DWM-Dunkel-Title-Bar (Stufe A — falls frameless mal scheitert)
+      * Taskbar/Window-Icon via WM_SETICON (Stufe B — fixt 'python'-Icon in
+        Source-Mode)
+    FindWindowW findet auch hidden=True Windows.
+
+    Iter. 36 Stufe C: zusaetzlich wird _switch_to_flask gestartet damit das
+    Splash-Window auf die Flask-URL umschaltet sobald /api/health antwortet.
+    """
+    ico_path = _ICON_PATH
+    deadline = time.time() + 4.0
+    pending = set(_WINDOW_TITLES)
+    while pending and time.time() < deadline:
+        for title in list(pending):
+            hwnd = _find_hwnd_by_title(title)
+            if hwnd:
+                _set_dark_title_bar(hwnd)
+                if ico_path:
+                    _set_window_icon(hwnd, ico_path)
+                pending.discard(title)
+        if pending:
+            time.sleep(0.1)
+    if pending:
+        print(f"[Window] konnte HWND nicht finden fuer: {pending}")
+
+    # Iter. 36 Stufe C: Splash → Flask wechseln
+    _switch_to_flask()
+
+
+def _switch_to_flask():
+    """Wartet bis Flask /api/health antwortet, dann laedt das Hauptfenster
+    die echte URL statt des Splash-HTML.
+    """
+    import urllib.request
+    main_win = _windows.get('main')
+    if not main_win:
+        return
+    deadline = time.time() + 20.0
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(f'{URL}/api/health', timeout=0.6).read()
+            try:
+                main_win.load_url(URL)
+            except Exception as e:
+                print(f"[Splash] load_url failed: {e}")
+            return
+        except Exception:
+            time.sleep(0.25)
+    print("[Splash] Flask antwortete nicht in 20s — Splash bleibt sichtbar")
+
+
+# wird in main() befuellt, damit _apply_dark_title_bars das Icon setzen kann
+_ICON_PATH = ""
+
+
+# Iter. 36 Stufe C: Splash-Screen. Pywebview laedt erst statisches HTML,
+# wechselt dann via window.load_url(URL) sobald Flask /api/health antwortet.
+# Verhindert das ~1-2s weisse/leere Fenster nach App-Start.
+SPLASH_HTML = """<!doctype html>
+<html lang="de"><head><meta charset="utf-8"/>
+<title>Deal Tracker</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: radial-gradient(ellipse at top, #1e293b 0%, #0b1220 55%, #050810 100%);
+    color: #e2e8f0;
+    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    user-select: none; -webkit-user-select: none;
+    overflow: hidden;
+  }
+  .splash-mark {
+    width: 88px; height: 88px;
+    border-radius: 22px;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+    display: grid; place-items: center;
+    box-shadow: 0 16px 40px rgba(129, 140, 248, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    margin-bottom: 22px;
+    animation: float 3s ease-in-out infinite;
+  }
+  .splash-mark svg { width: 44px; height: 44px; color: #fff; }
+  .splash-title {
+    font-size: 22px; font-weight: 800; letter-spacing: -0.4px;
+    background: linear-gradient(135deg, #fff 0%, #c4b5fd 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 6px;
+  }
+  .splash-sub {
+    font-size: 12px; color: rgba(226, 232, 240, 0.55);
+    letter-spacing: 0.6px; text-transform: uppercase;
+    margin-bottom: 28px;
+  }
+  .splash-spinner {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    border: 3px solid rgba(129, 140, 248, 0.15);
+    border-top-color: #8b5cf6;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-6px); }
+  }
+</style></head>
+<body>
+  <div class="splash-mark">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+      <circle cx="7" cy="7" r="1.5" fill="currentColor"/>
+    </svg>
+  </div>
+  <div class="splash-title">Deal Tracker</div>
+  <div class="splash-sub">startet&hellip;</div>
+  <div class="splash-spinner"></div>
+</body></html>"""
+
+
+class WindowAPI:
+    """Iter. 35 Stufe B: js_api fuer die Custom-HTML-Title-Bar.
+    Min/Max/Close-Buttons im HTML rufen ueber pywebview.api diese Methoden.
+    Pro Window eine Instanz mit dem Window-Key ('main' | 'scrape').
+    Close == hide() (gleicher Pfad wie closing-handler — App lebt im Tray).
+    """
+    def __init__(self, key: str):
+        self._key = key
+        self._maximized = False
+
+    def _win(self):
+        return _windows.get(self._key)
+
+    def minimize(self):
+        try:
+            w = self._win()
+            if w:
+                w.minimize()
+        except Exception as e:
+            print(f"[js_api] minimize({self._key}) failed: {e}")
+
+    def toggle_maximize(self):
+        try:
+            w = self._win()
+            if not w:
+                return
+            if self._maximized:
+                w.restore()
+                self._maximized = False
+            else:
+                w.maximize()
+                self._maximized = True
+        except Exception as e:
+            print(f"[js_api] toggle_maximize({self._key}) failed: {e}")
+
+    def close(self):
+        # Gleiche Logik wie X-Klick: hide statt destroy.
+        try:
+            w = self._win()
+            if w:
+                w.hide()
+        except Exception as e:
+            print(f"[js_api] close({self._key}) failed: {e}")
+
 
 def _make_closing_handler(window):
     """Returnt einen Handler der hide() statt destroy() macht — ausser
@@ -301,13 +557,36 @@ def _make_closing_handler(window):
     return handler
 
 
+def _bring_window_to_front(title: str):
+    """Iter. 35: pywebview's window.show() un-hidet nur — bringt das Window
+    nicht in den Vordergrund wenn es schon sichtbar ist (z.B. hinter anderen
+    Apps). Win32 SetForegroundWindow + SW_RESTORE holen es echt nach vorn.
+    """
+    try:
+        import ctypes
+        hwnd = _find_hwnd_by_title(title)
+        if not hwnd:
+            return
+        user32 = ctypes.windll.user32
+        SW_RESTORE = 9
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetForegroundWindow(hwnd)
+    except Exception as e:
+        print(f"[Win32] bring-to-front '{title}' failed: {e}")
+
+
 def _show_main_window():
     win = _windows.get('main')
     if win:
         try:
             win.show()
+            try:
+                win.restore()  # un-minimize falls minimiert
+            except Exception:
+                pass
         except Exception as e:
             print(f"[webview] show main failed: {e}")
+    _bring_window_to_front('Deal Tracker')
 
 
 def _show_scrape_window():
@@ -315,8 +594,13 @@ def _show_scrape_window():
     if win:
         try:
             win.show()
+            try:
+                win.restore()
+            except Exception:
+                pass
         except Exception as e:
             print(f"[webview] show scrape failed: {e}")
+    _bring_window_to_front('Deal Tracker — Scrape')
 
 
 def _trigger_scrape_via_http():
@@ -378,6 +662,11 @@ def _chrome_app_fallback():
 
 
 def main():
+    # Iter. 35 Stufe B: Taskbar/Windows-Identitaet. Muss VOR dem ersten Window-
+    # Create laufen damit Windows den Prozess als eigene App gruppiert (sonst
+    # erbt die Taskleiste das python.exe-Icon).
+    _set_app_user_model_id()
+
     # Iter. 29/34: Single-Instance-Lock. Wenn eine andere Instanz schon laeuft,
     # frag sie einfach ihr Fenster zu zeigen (HTTP-Endpunkt /api/window/show)
     # und beende uns selbst.
@@ -397,15 +686,8 @@ def main():
     flask_thread.start()
     _print_lan_urls()
 
-    # Warte bis Flask /api/health antwortet
-    for _ in range(20):
-        time.sleep(0.3)
-        try:
-            import urllib.request
-            urllib.request.urlopen(URL, timeout=1)
-            break
-        except Exception:
-            pass
+    # Iter. 36 Stufe C: kein blockierender Pre-Wait mehr — Splash-Window
+    # erscheint sofort, _switch_to_flask wartet im worker-thread auf /api/health.
 
     # Iter. 34: kein Chrome-Subprozess mehr. Iter. 31 Tray-Callbacks werden
     # an pywebview-Window-Methoden gebunden statt subprocess.Popen([chrome]).
@@ -447,14 +729,27 @@ def main():
             if os.path.isfile(cand):
                 icon_path = cand
 
+    # _apply_dark_title_bars sieht den Pfad ueber dieses Modul-Global
+    global _ICON_PATH
+    _ICON_PATH = icon_path if os.path.isfile(icon_path) else ""
+
+    # Iter. 35 Stufe B: frameless + js_api fuer Custom-HTML-Title-Bar.
+    # easy_drag=False weil wir nur die Title-Bar als Drag-Region wollen,
+    # nicht den ganzen Window-Body (sonst kollidieren Klicks im Content).
+    # Iter. 36 Stufe C: Window startet mit Splash-HTML, _switch_to_flask
+    # wechselt via load_url() zu Flask sobald /api/health antwortet —
+    # ersetzt das weisse Initial-Frame durch unseren Splash.
     main_win = webview.create_window(
         'Deal Tracker',
-        URL,
+        html=SPLASH_HTML,
         width=1400,
         height=900,
         min_size=(900, 600),
         background_color='#0b1220',
         text_select=True,
+        frameless=True,
+        easy_drag=False,
+        js_api=WindowAPI('main'),
     )
     scrape_win = webview.create_window(
         'Deal Tracker — Scrape',
@@ -465,6 +760,9 @@ def main():
         background_color='#0b1220',
         hidden=True,
         on_top=True,
+        frameless=True,
+        easy_drag=False,
+        js_api=WindowAPI('scrape'),
     )
     _windows['main'] = main_win
     _windows['scrape'] = scrape_win
@@ -475,6 +773,7 @@ def main():
 
     try:
         webview.start(
+            _apply_dark_title_bars,  # Iter. 35 Stufe A: DWM-Dark-Title-Bar
             icon=icon_path if os.path.isfile(icon_path) else None,
             debug=False,
             private_mode=False,  # localStorage etc. persistieren

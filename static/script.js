@@ -1100,7 +1100,10 @@ async function scrapeGroup(groupName, btn) {
     } else {
       const n = (res.targets || []).length;
       toast(`Gruppe „${groupName}" wird gescrapt (${n} Produkt${n === 1 ? '' : 'e'})…`, 'info');
-      pollUntilDone();
+      // Iter. 35 fix: kein globales 19-Quellen-Overlay fuer Per-Gruppe-Scrape —
+      // das wirkte so als wuerde alles gescrapt, obwohl Backend nur die Gruppe
+      // scrapt. Spinner am Group-Button + Status-Pill geben weiter Feedback.
+      pollUntilDone({ noOverlay: true });
     }
   } catch (err) {
     toast('Fehler: ' + (err?.message ?? 'unbekannt'), 'error');
@@ -1166,10 +1169,27 @@ const _PROG_LABEL = {
   error:   (info) => `Fehler${info.detail ? ' · ' + info.detail.replace(/^HTTP /, '') : ''}`,
 };
 
+function _ensureScrapePill(siteName) {
+  // Iter. 36: dynamisch fehlende Pills im Scrape-Overlay anlegen — sonst
+  // tauchen die 48 neuen Sites aus websitenliste.md gar nicht im Progress auf.
+  const list = document.getElementById('scrape-progress');
+  if (!list) return null;
+  let li = list.querySelector(`[data-site="${CSS.escape(siteName)}"]`);
+  if (li) return li;
+  li = document.createElement('li');
+  li.dataset.site = siteName;
+  const state = document.createElement('span'); state.className = 'prog-state';
+  const name  = document.createElement('span'); name.className  = 'prog-name'; name.textContent = siteName;
+  const count = document.createElement('span'); count.className = 'prog-count';
+  li.append(state, name, count);
+  list.appendChild(li);
+  return li;
+}
+
 function updateScrapeProgress(s) {
   if (!s.sites) return;
   for (const [site, info] of Object.entries(s.sites)) {
-    const li = document.querySelector(`#scrape-progress [data-site="${site}"]`);
+    const li = _ensureScrapePill(site);
     if (!li) continue;
     li.classList.remove('prog-done', 'prog-err', 'prog-empty', 'prog-blocked');
     const cnt = li.querySelector('.prog-count');

@@ -37,6 +37,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+# Iter. 35: Jinja darf Templates nach Edits sofort neu rendern — sonst
+# erzwingen Template-Aenderungen einen App-Restart (Default bei debug=False).
+# Dev-bequemer, in einer Single-User-Desktop-App vernachlaessigbarer Overhead.
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.auto_reload = True
+
 # init_db() is called in main.py for the desktop-app flow.
 # For standalone runs (python app.py) we initialise here via __name__ guard at bottom.
 

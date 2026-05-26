@@ -1,0 +1,22 @@
+{
+  "extends": ["development"],
+  "hints": {
+    "compat-api/css": "off",
+    "compat-api/html": "off",
+    "css-prefix-order": "off",
+    "no-inline-styles": "off",
+    "axe/forms": "off",
+    "axe/aria": "off",
+    "axe/keyboard": "off",
+    "axe/structure": "off",
+    "axe/color": "off",
+    "axe/sensory-and-visual-cues": "off",
+    "axe/parsing": "off",
+    "axe/text-alternatives": "off",
+    "axe/time-and-media": "off",
+    "axe/name-role-value": "off",
+    "axe/language": "off",
+    "axe/semantics": "off",
+    "axe/other": "off"
+  }
+}
