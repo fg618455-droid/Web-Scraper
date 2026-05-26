@@ -97,6 +97,83 @@ except (FileNotFoundError, json.JSONDecodeError):
 HOST = CONFIG.get("host", "127.0.0.1")
 PORT = CONFIG.get("port", 5001)
 
+
+def _setup_dealscraper_chrome_profile() -> str | None:
+    """Iter. 30: bereitet ein dediziertes Chrome-User-Profile fuer das Scraping
+    vor. Hintergrund:
+
+      * In Iter. 29 hat main.py den App-Chrome mit --remote-debugging-port=9222
+        gestartet, in der Annahme dass scraper.fetch_ebay_via_cdp diesen
+        Browser via CDP nutzen kann. Live-Diagnose 2026-05-25 hat aber
+        gezeigt dass der Port NIE erreichbar wurde — wenn Felix' normaler
+        Chrome offen ist, behandelt Chrome '--app=...' als child-Aufruf
+        und der CDP-Flag wird ignoriert (Single-Instance-Verhalten pro
+        User-Data-Dir).
+      * Loesung: scraper.fetch_ebay_via_persistent startet eine
+        SEPARATE Chromium-Instanz mit eigenem user-data-dir. Diese
+        Instanz kollidiert nicht mit Felix' Default-Chrome.
+      * Damit Akamai diese frische Instanz nicht als "leerer Bot"
+        erkennt, kopieren wir aus dem Default-Profile die identitaets-
+        relevanten Files (Local State, Preferences). Cookies sind beim
+        laufenden Default-Chrome locked und kommen NICHT mit — Tests
+        haben aber gezeigt dass /itm/<id> auch ohne Login-Cookies durch
+        Akamai durchgeht (Browser-Fingerprint reicht).
+
+    Returns the absolute profile path (or None on hard failure).
+    Idempotent: kopiert nur beim ersten Start.
+    """
+    import shutil
+    profile = os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                           "DealScraper", "ScraperProfile")
+    if not profile or not os.environ.get("LOCALAPPDATA"):
+        return None
+
+    default_user_data = os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                                     "Google", "Chrome", "User Data")
+    try:
+        os.makedirs(os.path.join(profile, "Default", "Network"), exist_ok=True)
+    except Exception as e:
+        print(f"[Profile] mkdir failed: {e}")
+        return None
+
+    # Idempotent: skippe die Kopie wenn schon Files da sind UND aelter als 7 Tage
+    # (so dass die Files irgendwann auf-frischen, falls Felix sein Chrome updated).
+    flag = os.path.join(profile, ".staged")
+    needs_stage = True
+    if os.path.exists(flag):
+        try:
+            age = time.time() - os.path.getmtime(flag)
+            needs_stage = age > 7 * 24 * 3600
+        except Exception:
+            pass
+
+    if needs_stage and os.path.isdir(default_user_data):
+        files = [
+            (os.path.join(default_user_data, "Local State"),
+             os.path.join(profile, "Local State")),
+            (os.path.join(default_user_data, "Default", "Preferences"),
+             os.path.join(profile, "Default", "Preferences")),
+        ]
+        for src, dst in files:
+            if not os.path.exists(src):
+                continue
+            try:
+                shutil.copy2(src, dst)
+            except Exception as e:
+                # locked / permission: nicht fatal, weiter
+                print(f"[Profile] copy {os.path.basename(src)}: {e}")
+        try:
+            with open(flag, "w") as fp:
+                fp.write(str(time.time()))
+        except Exception:
+            pass
+
+    os.environ["DEALSCRAPER_PROFILE_PATH"] = profile
+    return profile
+
+
+_setup_dealscraper_chrome_profile()
+
 import database as db
 db.init_db()
 
@@ -116,6 +193,25 @@ BROWSER_CANDIDATES = [
 def _run_flask():
     flask_app.run(host=HOST, port=PORT, debug=False,
                   use_reloader=False, threaded=True)
+
+
+def _another_instance_running() -> bool:
+    """True wenn schon eine DealScraper-Instanz auf PORT lauscht.
+
+    Iter. 29: Verhindert dass ein zweiter Doppelklick still im Hintergrund
+    haengt (kann den Port nicht binden, Flask wirft EADDRINUSE im daemon-
+    Thread, der Prozess bleibt ohne UI offen). Stattdessen oeffnen wir nur
+    den Browser auf die bereits laufende Instanz und beenden uns selbst.
+    """
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.5)
+    try:
+        sock.connect((HOST if HOST not in ('', '0.0.0.0') else '127.0.0.1', PORT))
+        sock.close()
+        return True
+    except (ConnectionRefusedError, socket.timeout, OSError):
+        return False
 
 
 def _print_lan_urls():
@@ -174,6 +270,23 @@ def check_updates_and_prompt():
 
 
 def main():
+    # Iter. 29: Single-Instance-Lock. Wenn eine andere Instanz schon laeuft,
+    # nur den Browser auf die existierende Instanz oeffnen und Exit.
+    if _another_instance_running():
+        print(f"DealScraper laeuft bereits auf {URL} — oeffne nur das Fenster.")
+        browser = _find_browser()
+        if browser:
+            subprocess.Popen([
+                browser,
+                "--app={}".format(URL),
+                "--start-fullscreen",
+                "--start-maximized",
+                "--disable-extensions",
+            ])
+        else:
+            webbrowser.open(URL)
+        return
+
     check_updates_and_prompt()
 
     flask_thread = threading.Thread(target=_run_flask, daemon=True)
@@ -191,13 +304,23 @@ def main():
 
     browser = _find_browser()
     if browser:
+        # Iter. 29: Chrome bekommt CDP-Port + Anti-Automation-Flag damit die
+        # App den User-Browser als eBay-Renderer benutzen kann (umgeht Akamai
+        # weil dieser Browser Felix' echte Login-Cookies + Browser-Fingerprint
+        # mitbringt). Siehe scraper.fetch_ebay_via_cdp.
+        cdp_port = CONFIG.get("cdp_port", 9222)
         subprocess.Popen([
             browser,
             "--app={}".format(URL),
             "--start-fullscreen",
             "--start-maximized",
             "--disable-extensions",
+            f"--remote-debugging-port={cdp_port}",
+            "--remote-allow-origins=*",
+            "--disable-blink-features=AutomationControlled",
         ])
+        # Pfad fuer scraper.fetch_ebay_via_cdp bekannt machen
+        os.environ["DEALSCRAPER_CDP_PORT"] = str(cdp_port)
     else:
         webbrowser.open(URL)
 

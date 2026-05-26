@@ -40,6 +40,14 @@ icon.png
 debug_html/
 playwright-check/
 .playwright/
+version.json
+
+# Local scratch dir: contains Playwright browser bundles (large) + ad-hoc
+# diagnosis scripts. We DO want the .py scripts in the repo, but NOT the
+# binaries that Playwright drops here when run from this folder.
+play/*
+!play/*.py
+!play/*.md
 
 # Config (falls Secrets drin landen)
 .env

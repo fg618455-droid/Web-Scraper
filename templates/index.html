@@ -412,6 +412,42 @@
           <span>Bei eBay öffnen</span>
         </a>
       </div>
+
+      <!-- Iter. 29: Bookmarklet-Sync – ein-Klick-Aktualisierung aus dem eBay-Tab -->
+      <details id="auction-modal-sync" class="sync-setup">
+        <summary class="sync-summary">
+          <svg class="btn-icon-svg"><use href="#i-bell"/></svg>
+          <span>1-Klick-Sync einrichten (umgeht eBay-Block)</span>
+        </summary>
+        <div class="sync-body">
+          <p class="sync-explain">
+            eBay blockt unsere direkten Abfragen mit Akamai. Mit dem
+            <b>DealScraper-Sync</b>-Lesezeichen klickst du im eBay-Tab
+            <b>einmal</b> &mdash; und alle Gebote landen sofort in der App.
+          </p>
+          <ol class="sync-steps">
+            <li>
+              <b>Ziehen, nicht klicken:</b> Schiebe diesen pinken Button
+              in deine Lesezeichen-Leiste &rarr;
+              <a id="sync-bookmarklet" class="sync-bookmarklet" href="#" draggable="true"
+                 title="Per Drag &amp; Drop in die Lesezeichen-Leiste ziehen">
+                <svg class="btn-icon-svg"><use href="#i-refresh"/></svg>
+                <span>DealScraper-Sync</span>
+              </a>
+            </li>
+            <li>
+              Wenn Drag nicht klappt: <button type="button" class="btn-link" id="sync-copy-btn">Code kopieren</button>
+              &rarr; in Chrome <kbd>Strg+D</kbd> &rarr; URL durch den
+              kopierten Code ersetzen.
+            </li>
+            <li>
+              Öffne die <b>eBay-Item-Seite</b> oder die <b>Gebotsübersicht</b>
+              im normalen Chrome (nicht in dieser App). Klick das gespeicherte
+              Lesezeichen &mdash; fertig.
+            </li>
+          </ol>
+        </div>
+      </details>
     </div>
   </div>
 </div>

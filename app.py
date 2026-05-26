@@ -7,6 +7,7 @@ import csv
 import io
 import logging
 import os
+import re
 import threading
 import time
 from collections import defaultdict
@@ -44,6 +45,32 @@ app = Flask(__name__)
 def handle_exception(e):
     logger.exception('Unhandled exception: %s', e)
     return jsonify({'error': str(e)}), 500
+
+
+# Iter. 29: CORS-Header fuer den Bookmarklet-Pfad. eBay-Tab schickt fetch()
+# zu http://127.0.0.1:5001 — das ist cross-origin, also muss der Browser
+# explizit eine Erlaubnis vom Server sehen. Liberal halten weil das ein
+# localhost-Service ist; nur fuer die /api/ebay-paste-html-Route relevant
+# aber sicher dass es nicht stoert wenn es global gilt.
+_BOOKMARKLET_ORIGINS = ('https://www.ebay.de', 'https://www.ebay.com',
+                        'https://ebay.de', 'https://ebay.com')
+
+
+@app.after_request
+def _add_cors_headers(response):
+    origin = request.headers.get('Origin', '')
+    if origin in _BOOKMARKLET_ORIGINS:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Vary'] = 'Origin'
+    return response
+
+
+@app.route('/api/ebay-paste-html', methods=['OPTIONS'])
+def api_ebay_paste_html_preflight():
+    # Browser sends OPTIONS preflight before POSTing JSON. Reply with empty 200.
+    return ('', 204)
 
 
 @app.route('/favicon.ico')
@@ -230,15 +257,26 @@ def _refresh_one_auction(deal: dict) -> bool:
 
     # Authoritative bid timeline if reachable — replaces our sampled snapshots
     # with every single bid increment eBay records.
-    # Iter. 27 F17: Ohne gespeicherte Login-Session frisst der Aufruf nur
-    # nutzlose Akamai-Cooldowns (unauth-Pfad ist seit 2026-05-18 dauerhaft
-    # geblockt). Wir versuchen den Auto-Pull NUR wenn der User eingeloggt ist.
-    # Manuelles "Jetzt aktualisieren" + "Gebote einfuegen" funktioniert
-    # weiterhin (api_refresh_deal probiert es trotzdem fuer User-Feedback).
+    #
+    # Iter. 29: Wenn CDP verfuegbar ist (App-Chrome laeuft mit Debug-Port),
+    # nutzt scrape_ebay_bid_history den CDP-Pfad zuerst. Der trifft Akamai
+    # ueber den realen User-Browser → keine Cooldown-Verbrennung mehr, auch
+    # ohne separate Login-Session. Fallback auf Login-Session-Check bleibt
+    # fuer Setups wo die App z.B. ueber webbrowser.open() laeuft.
     if merged.get('listing_type') == 'auction':
         try:
-            from ebay_session import has_session as _ebay_has_session
-            if _ebay_has_session():
+            # Iter. 30: Persistent off-screen Chromium ist der neue primary
+            # Akamai-Bypass. CDP bleibt als Backup. Login-Session als letztes.
+            persist_ok = scraper._persistent_available()
+            cdp_ok = False if persist_ok else scraper._cdp_available()
+            have_login = False
+            if not (persist_ok or cdp_ok):
+                try:
+                    from ebay_session import has_session as _ebay_has_session
+                    have_login = _ebay_has_session()
+                except Exception:
+                    pass
+            if persist_ok or cdp_ok or have_login:
                 bids = scraper.scrape_ebay_bid_history(deal['url'])
                 if bids:
                     db.replace_price_history(deal['id'], bids)
@@ -858,6 +896,194 @@ def api_import_bid_history(deal_id: int):
             conn.close()
     refreshed = db.get_deal_by_id(deal_id)
     return jsonify({'ok': True, 'deal': refreshed, 'bids_imported': imported})
+
+
+def _find_ebay_deal_by_item_id(item_id: str) -> dict | None:
+    """Resolve a deal by an eBay item-ID extracted from the bookmarklet's URL.
+
+    eBay item-URLs come in many shapes (/itm/<title>/<id>, /itm/<id>, query
+    ?item=<id>, etc.) — the bookmarklet sends us the raw 10-13 digit ID.
+    """
+    if not item_id or not item_id.isdigit():
+        return None
+    try:
+        conn = db.get_connection()
+        # LIKE matches the ID anywhere in the deal URL.
+        row = conn.execute(
+            "SELECT * FROM deals WHERE website='eBay' AND url LIKE ? "
+            "ORDER BY available DESC, last_seen DESC LIMIT 1",
+            (f'%{item_id}%',),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.warning('item-id lookup failed for %s: %s', item_id, e)
+        return None
+
+
+@app.route('/api/ebay-paste-html', methods=['POST'])
+def api_ebay_paste_html():
+    """Iter. 29: Bookmarklet-Sync-Endpunkt.
+
+    Felix klickt auf der eBay-Gebotsuebersicht oder Item-Page ein Bookmarklet,
+    das via fetch() das geladene Document an uns schickt. Wir parsen was wir
+    finden (Bid-History UND/ODER Item-Page-Felder), schreiben in die DB,
+    geben strukturiertes Feedback zurueck.
+
+    Warum das funktioniert wo refresh_ebay_item versagt:
+      - Der Browser hat Felix' Login-Cookies geladen — Akamai laesst ihn durch.
+      - Das HTML ist die voll-gerenderte DOM-Variante (mit JS-Updates).
+      - Cross-Origin von ebay.de zu 127.0.0.1 funktioniert dank CORS-Header
+        (siehe _add_cors_headers oben).
+
+    Request (alle Felder optional, mindestens eines noetig):
+      JSON: {"item_id": "257520336815", "url": "https://...", "html": "<!doctype..."}
+      ODER text/plain Body (raw HTML) + ?item=<id> Query-Param.
+
+    Response:
+      {
+        "ok": true,
+        "deal": {...},                  # aktualisierter Deal (oder null bei Nicht-Erfolg)
+        "bids_imported": 17,
+        "fields_updated": ["price", "bid_count", "auction_ends_at"],
+        "matched_by": "item_id" | "url",
+        "warning": "..."                # nur bei Teil-Erfolg
+      }
+    """
+    # ── 1. Body lesen (akzeptiert JSON oder raw text/plain HTML) ─────────────
+    content_type = (request.content_type or '').lower()
+    payload: dict = {}
+    if 'application/json' in content_type:
+        payload = request.get_json(force=True, silent=True) or {}
+    else:
+        # Bookmarklet schickt text/plain um CORS-Preflight zu vermeiden
+        # (Content-Type: text/plain ist "simple request" — kein OPTIONS noetig).
+        # Das HTML ist dann der Body.
+        try:
+            payload = {'html': request.get_data(as_text=True)}
+        except Exception:
+            payload = {}
+
+    html = (payload.get('html') or '').strip()
+    item_id = (payload.get('item_id') or request.args.get('item') or '').strip()
+    url = (payload.get('url') or '').strip()
+
+    if not html:
+        return jsonify({'error': 'Kein HTML empfangen. Bookmarklet richtig gedrueckt?'}), 400
+
+    # ── 2. Item-ID aus URL extrahieren wenn nicht mitgeschickt ───────────────
+    if not item_id and url:
+        m = re.search(r'(\d{10,15})', url)
+        if m:
+            item_id = m.group(1)
+    if not item_id:
+        # Letzter Versuch: aus dem HTML selbst (canonical/og:url Tag)
+        m = re.search(r'(?:item=|/itm/(?:[^/]+/)?)(\d{10,15})', html)
+        if m:
+            item_id = m.group(1)
+
+    if not item_id:
+        return jsonify({'error': 'Konnte eBay-Artikel-ID nicht erkennen. '
+                                 'Bookmarklet auf /itm/ oder /bfl/viewbids/ Seite anwenden.'}), 400
+
+    # ── 3. Deal in der DB finden ─────────────────────────────────────────────
+    deal = _find_ebay_deal_by_item_id(item_id)
+    if not deal:
+        return jsonify({'error': f'Kein Deal mit eBay-ID {item_id} in der DB. '
+                                 'Wurde dieses Item schon mal gescrapt?'}), 404
+
+    fields_updated: list[str] = []
+    bids_imported = 0
+    warnings: list[str] = []
+
+    # ── 4. Bid-History extrahieren (falls die HTML eine Tabelle enthaelt) ───
+    try:
+        bids = scraper.parse_ebay_bid_history(html)
+    except Exception as e:
+        logger.warning('parse_ebay_bid_history failed: %s', e)
+        bids = []
+
+    if bids:
+        bids_imported = db.replace_price_history(deal['id'], bids)
+        logger.info(f'paste-html: imported {bids_imported} bids for deal {deal["id"]} (item {item_id})')
+
+    # ── 5. Item-Page-Felder extrahieren (Preis / bid_count / Endzeit / ended)
+    try:
+        item_fields = scraper.parse_ebay_item_page_html(html)
+    except Exception as e:
+        logger.warning('parse_ebay_item_page_html failed: %s', e)
+        item_fields = {}
+
+    # ── 6. Ende-Detection separat behandeln ─────────────────────────────────
+    if item_fields.get('ended'):
+        try:
+            conn = db.get_connection()
+            conn.execute('UPDATE deals SET available=0, last_seen=? WHERE id=?',
+                         (datetime.now().isoformat(), deal['id']))
+            conn.commit()
+            conn.close()
+            fields_updated.append('ended')
+            logger.info(f'paste-html: auction {deal["id"]} marked ended')
+        except Exception as e:
+            logger.warning('mark ended failed: %s', e)
+
+    # ── 7. Volatile Felder mergen + speichern ───────────────────────────────
+    merged = dict(deal)
+    volatile_keys = ('price', 'bid_count', 'auction_ends_at', 'listing_type')
+    for k in volatile_keys:
+        if k in item_fields and item_fields[k] != merged.get(k):
+            merged[k] = item_fields[k]
+            if k not in fields_updated:
+                fields_updated.append(k)
+
+    # Wenn wir Bids haben, ist der hoechste Bid der wahre aktuelle Preis —
+    # ueberschreibt was die Item-Page sagt, weil bid-history granularer ist.
+    if bids:
+        try:
+            highest = max(b['price'] for b in bids if b.get('price') is not None)
+            if highest and highest != merged.get('price'):
+                merged['price'] = highest
+                if 'price' not in fields_updated:
+                    fields_updated.append('price')
+            # bid_count aus tatsaechlicher Bid-Anzahl bei eindeutigen Bietern
+            # ist tendenziell weniger zuverlaessig als der eBay-eigene Counter,
+            # aber wenn der Item-Page-Parser nichts geliefert hat, nutzen wir
+            # zumindest die importierte Anzahl als Untergrenze.
+            if 'bid_count' not in fields_updated:
+                merged['bid_count'] = max(merged.get('bid_count') or 0, len(bids))
+                if merged['bid_count'] != deal.get('bid_count'):
+                    fields_updated.append('bid_count')
+        except Exception as e:
+            logger.warning('paste-html price recompute failed: %s', e)
+
+    if fields_updated and not item_fields.get('ended'):
+        merged['last_seen'] = datetime.now().isoformat()
+        try:
+            db.insert_or_update_deal(merged)
+        except Exception as e:
+            logger.warning('paste-html: insert_or_update failed: %s', e)
+            warnings.append('DB-Schreiben hat einen Fehler geworfen, Daten evtl. unvollstaendig.')
+
+    refreshed = db.get_deal_by_id(deal['id'])
+
+    if not bids and not fields_updated:
+        return jsonify({
+            'ok': False,
+            'error': 'HTML empfangen, aber weder Gebote noch Preis-Felder erkannt. '
+                     'War die Seite voll geladen?',
+            'item_id': item_id,
+            'deal_id': deal['id'],
+        }), 422
+
+    return jsonify({
+        'ok': True,
+        'deal': refreshed,
+        'deal_id': deal['id'],
+        'item_id': item_id,
+        'bids_imported': bids_imported,
+        'fields_updated': fields_updated,
+        'warning': '; '.join(warnings) if warnings else None,
+    })
 
 
 @app.route('/api/sellers/block', methods=['POST'])

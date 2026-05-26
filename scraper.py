@@ -5,11 +5,13 @@ Scraping logic.
 All three run in parallel via ThreadPoolExecutor.
 """
 
+import atexit
 import json
 import os
 import random
 import re
 import logging
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -902,11 +904,39 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
     if not item_id:
         return []
 
+    from urllib.parse import urlparse
+    p = urlparse(item_url)
+    host  = p.netloc or 'www.ebay.de'
+    proto = p.scheme or 'https'
+    url = f'{proto}://{host}/bfl/viewbids/{item_id}?item={item_id}&rt=nc'
+
+    html = ''
+
+    # ── Attempt 0a (Iter. 30): Persistent off-screen Chromium ─────────────
+    # Highest priority — Diagnose 2026-05-25 zeigte zwar dass /bfl/viewbids/
+    # auch via Persistent nur 43kB liefert (vermutlich login-required), aber
+    # Versuch ist billig und kostet keinen Cooldown. Wenn's mal greift,
+    # nehmen wir die volle History.
+    persist_html = fetch_ebay_via_persistent(url)
+    if persist_html:
+        persist_bids = parse_ebay_bid_history(persist_html)
+        if persist_bids:
+            logger.info(f'bid-history for {item_id}: {len(persist_bids)} bids parsed (persistent)')
+            return persist_bids
+        logger.info(f'bid-history for {item_id}: persistent HTML had no parseable bids')
+
+    # ── Attempt 0b (Iter. 29): CDP via App-Chrome ─────────────────────────
+    # Fallback fuer den seltenen Fall dass der App-Chrome Master ist.
+    cdp_html = fetch_ebay_via_cdp(url)
+    if cdp_html:
+        cdp_bids = parse_ebay_bid_history(cdp_html)
+        if cdp_bids:
+            logger.info(f'bid-history for {item_id}: {len(cdp_bids)} bids parsed (CDP)')
+            return cdp_bids
+        logger.info(f'bid-history for {item_id}: CDP HTML had no parseable bids')
+
     # ── Iter. 27 C10: Cooldown gate, ausdifferenziert auth/unauth ─────────
-    # If the user has saved a login session, skip plain requests entirely —
-    # eBay blocks unauthenticated GETs to /bfl/viewbids/ with an Akamai-page
-    # that would set the cooldown and starve the authenticated Playwright
-    # path of its chance. Go straight to PW with storage_state. (Iter. 26)
+    # Skip the requests/PW paths if their cooldowns are active.
     have_login_session = False
     try:
         from ebay_session import has_session as _ebay_has_session
@@ -929,14 +959,6 @@ def scrape_ebay_bid_history(item_url: str) -> list[dict]:
                 item_id, _EBAY_BLOCKED_UNTIL - now,
             )
             return []
-
-    from urllib.parse import urlparse
-    p = urlparse(item_url)
-    host  = p.netloc or 'www.ebay.de'
-    proto = p.scheme or 'https'
-    url = f'{proto}://{host}/bfl/viewbids/{item_id}?item={item_id}&rt=nc'
-
-    html = ''
 
     # ── Attempt 1: plain requests (fast) — skipped when logged in ─────────
     if not have_login_session:
@@ -1193,42 +1215,25 @@ def _parse_ebay_item_end_time(soup, html: str) -> str | None:
     return None
 
 
-def refresh_ebay_item(url: str) -> dict | None:
-    """Fetch a single eBay item page and parse current price + bid count.
-    Used for the modal's "Jetzt aktualisieren" button so users can poll
-    a live auction faster than the scheduled scrape interval.
+def parse_ebay_item_page_html(html: str) -> dict:
+    """Parse a fully-loaded eBay /itm/ page HTML and return the volatile fields:
+    {price, bid_count, listing_type, auction_ends_at, ended}.
 
-    Returns a dict containing ONLY the fields we could actually parse — keys
-    are omitted (not set to None) when parsing fails, so the caller can do a
-    safe `.update()` without wiping existing values. Returns None only if the
-    HTTP request itself failed.
+    Iter. 29: Extracted from refresh_ebay_item() so the same logic can be reused
+    by the Bookmarklet-Sync endpoint (/api/ebay-paste-html) where the HTML is
+    submitted directly from the user's browser — bypassing Akamai because the
+    browser already holds a valid session cookie.
+
+    Returns dict with ONLY the keys we successfully parsed (no None values).
+    Empty dict if nothing parseable.
     """
-    import requests
-    session = requests.Session()
-    session.headers.update(_BIG_SHOP_HEADERS)
-    try:
-        session.get('https://www.ebay.de/', timeout=10)
-        r = session.get(url, timeout=15)
-        if r.status_code != 200:
-            logger.warning('refresh_ebay_item HTTP %s for %s', r.status_code, url)
-            return None
-    except Exception as e:
-        logger.warning('refresh_ebay_item HTTP fail: %s', e)
-        return None
+    if not html:
+        return {}
 
-    # Iter. 26: Akamai serves a 13-30kB splash/captcha page instead of the real
-    # item page. The price/bid selectors would silently miss, AND the auction-
-    # ended-marker check would say "still live" — both leading to bad UX (fake
-    # "Aktualisiert OK" toast, deal never marked ended). Bail out honestly so
-    # the caller can surface a "eBay blockt gerade — spaeter nochmal" message.
-    if _ebay_response_is_blocked(r.text) or len(r.text) < 40_000:
-        logger.info('refresh_ebay_item: eBay returned splash/short page for %s (len=%d) — treating as blocked', url, len(r.text))
-        return {'blocked': True}
-
-    soup = BeautifulSoup(r.text, 'lxml')
+    soup = BeautifulSoup(html, 'lxml')
     out: dict = {}
 
-    # ── Price: try multiple selectors, then meta tags, then regex on body
+    # ── Price: multiple selectors, then meta tags
     price = None
     price_el = soup.select_one(
         '[itemprop="price"], .x-price-primary span.ux-textspans, '
@@ -1249,40 +1254,28 @@ def refresh_ebay_item(url: str) -> dict | None:
     if price is not None and price >= 1:
         out['price'] = price
 
-    # ── Bid count: covers current DOM + legacy. Also raw-text fallback.
+    # ── Bid count
     bid_count = None
     bid_el = soup.select_one(
         '.x-bid-count, [data-testid*="bid-count"], '
         '[class*="bid-count"], [class*="BidCount"], '
         '[class*="bidding__action--bids"], [class*="vi-bidding"] [class*="bids"]'
     )
-    bid_text = bid_el.get_text(' ', strip=True) if bid_el else r.text
+    bid_text = bid_el.get_text(' ', strip=True) if bid_el else html
     m = re.search(r'(\d+)\s+Gebote?\b', bid_text, re.IGNORECASE)
     if m:
         bid_count = int(m.group(1))
     if bid_count is not None:
         out['bid_count'] = bid_count
-        # Only assert listing_type when we positively detected an auction. If we
-        # can't tell, leave it alone — the caller preserves the original value
-        # (so 'auction' isn't accidentally clobbered with 'fixed').
         out['listing_type'] = 'auction'
 
-    # ── Iter. 27 B6: Auktions-Endzeit von der Item-Detail-Seite ──────────
-    # Im Such-Result haben wir nur den relativen Countdown ("Noch 2h 14m"),
-    # auf der Item-Page steht oft das absolute Datum als data-Attribut oder
-    # Microdata. Wenn nichts absolutes da ist, parsen wir den relativen
-    # Countdown der Item-Page (genauer als Such-Result weil eBay diesen
-    # dort live aktualisiert).
-    ends_iso = _parse_ebay_item_end_time(soup, r.text)
+    # ── Endzeit aus Item-Page (absolutes Datum oder relativer Countdown)
+    ends_iso = _parse_ebay_item_end_time(soup, html)
     if ends_iso:
         out['auction_ends_at'] = ends_iso
 
-    # ── Auction ended detection ───────────────────────────────────────────
-    # eBay shows specific copy when a listing is closed. If any of these
-    # phrases appears, we mark the deal as ended so the UI can hide it.
-    # We OR-check against the lowercased body (cheap) AND a few specific
-    # status containers.
-    body_lo = r.text.lower()
+    # ── Auction-Ende-Marker
+    body_lo = html.lower()
     ended_markers = (
         'this listing has ended',
         'diese auktion ist beendet',
@@ -1293,24 +1286,387 @@ def refresh_ebay_item(url: str) -> dict | None:
         'das angebot wurde beendet',
         'bidding has ended',
         'gebotsabgabe beendet',
-        'sold for',                # ended + sold copy
+        'sold for',
         '"itemavailability":"outofstock"',
         '"itemavailability":"discontinued"',
         '"itemavailability":"soldout"',
-        # Iter. 26: Verkaeufer-Cancel-Faelle die mit "Dieses Angebot wurde vom
-        # Verkaeufer ... beendet" / "Originalangebot ansehen" als roter BEENDET-
-        # Badge erscheinen. Felix' Screenshot 2026-05-24 (deal 267678357840).
         'originalangebot ansehen',
         'wurde vom verkäufer',
         'wurde vom verkaeufer',
         'angebot wurde vom verkäufer',
         'da es einen fehler enthielt',
-        '>beendet<',                # roter Status-Tag direkt im DOM
+        '>beendet<',
     )
     if any(m_ in body_lo for m_ in ended_markers):
         out['ended'] = True
 
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Iter. 29: CDP-Fetch über den App-eigenen Chrome (Akamai-Bypass).
+# main.py startet Chrome mit --remote-debugging-port=9222. Wenn der erreich-
+# bar ist, koennen wir per Playwright connect_over_cdp() einen Hintergrund-
+# Tab DARIN aufmachen. Dieser Chrome ist Felix' echter User-Browser mit
+# echten eBay-Cookies + echtem Browser-Fingerprint — Akamai laesst ihn durch.
+# ─────────────────────────────────────────────────────────────────────────
+
+_CDP_LAST_TRIED_AT: float = 0.0
+_CDP_LAST_OK: bool = False
+_CDP_RECHECK_SEC: float = 10.0
+
+
+def _cdp_endpoint() -> str:
+    port = os.environ.get('DEALSCRAPER_CDP_PORT', '9222')
+    return f'http://127.0.0.1:{port}'
+
+
+def _cdp_available() -> bool:
+    """Cheap probe: GET /json/version on the CDP port.
+
+    Cached for _CDP_RECHECK_SEC to avoid spamming when Chrome isn't running
+    with the debug flag (older user opened the app once without restart).
+    """
+    global _CDP_LAST_TRIED_AT, _CDP_LAST_OK
+    now = time.time()
+    if now - _CDP_LAST_TRIED_AT < _CDP_RECHECK_SEC:
+        return _CDP_LAST_OK
+    _CDP_LAST_TRIED_AT = now
+    try:
+        import requests as _req
+        r = _req.get(f'{_cdp_endpoint()}/json/version', timeout=1.5)
+        _CDP_LAST_OK = (r.status_code == 200)
+    except Exception:
+        _CDP_LAST_OK = False
+    return _CDP_LAST_OK
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Iter. 30: Persistent-Context-Fetch (echter Akamai-Bypass).
+#
+# Iter. 29 CDP via App-Chrome scheiterte live: wenn Felix' Default-Chrome
+# offen ist, ignoriert ein zweiter Chrome-Aufruf mit gleichem User-Data-Dir
+# den --remote-debugging-port-Flag (Single-Instance-Verhalten). Resultat:
+# Port 9222 wurde nie erreichbar → CDP-Pfad inaktiv → alle Refreshes via
+# requests → blocked.
+#
+# Loesung: separate Chromium-Instanz mit eigenem user-data-dir, gestartet
+# direkt aus Python via launch_persistent_context. Kollidiert nicht mit
+# Felix' Default-Chrome. Off-screen Window-Position macht sie unsichtbar.
+# Diagnose 2026-05-25 hat /itm/<id> = 787 KB Vollseite, kein Akamai-Marker
+# bestaetigt (siehe play/diagnose_persistent_headless.py).
+#
+# Headless=True wird von Akamai erkannt → wir nutzen headed mit Off-Screen.
+# ─────────────────────────────────────────────────────────────────────────
+
+_PERSIST_LOCK = threading.Lock()
+_PERSIST_PW = None     # playwright.sync_api.Playwright instance
+_PERSIST_CTX = None    # BrowserContext (launch_persistent_context returnt direkt einen Context)
+_PERSIST_LAST_USE = 0.0
+_PERSIST_DISABLED = False  # set to True after a hard failure to skip subsequent attempts for a while
+_PERSIST_DISABLED_UNTIL = 0.0
+
+
+def _persistent_profile_path() -> str | None:
+    """Pfad zum dedicated Chrome-Profile. None falls nicht initialisiert."""
+    p = os.environ.get("DEALSCRAPER_PROFILE_PATH", "")
+    if p and os.path.isdir(os.path.dirname(p)):
+        return p
+    # Fallback: bauen wir selbst (Source-Run ohne main.py-Setup)
+    localapp = os.environ.get("LOCALAPPDATA", "")
+    if localapp:
+        return os.path.join(localapp, "DealScraper", "ScraperProfile")
+    return None
+
+
+def _persistent_available() -> bool:
+    """True wenn das Persistent-Profile bereit ist und Playwright importierbar."""
+    if _PERSIST_DISABLED and time.time() < _PERSIST_DISABLED_UNTIL:
+        return False
+    if not _persistent_profile_path():
+        return False
+    try:
+        import playwright  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _ensure_persistent_context():
+    """Lazy-startet sync_playwright + launch_persistent_context, cached fuer
+    die Lifetime des Prozesses. Caller muss _PERSIST_LOCK bereits halten.
+    """
+    global _PERSIST_PW, _PERSIST_CTX
+    if _PERSIST_CTX is not None:
+        # check ob noch alive
+        try:
+            _PERSIST_CTX.pages  # raises wenn closed
+            return _PERSIST_CTX
+        except Exception:
+            logger.info('Persistent context died, restarting')
+            _PERSIST_CTX = None
+            try:
+                if _PERSIST_PW is not None:
+                    _PERSIST_PW.stop()
+            except Exception:
+                pass
+            _PERSIST_PW = None
+
+    profile = _persistent_profile_path()
+    if not profile:
+        return None
+    try:
+        os.makedirs(os.path.join(profile, "Default", "Network"), exist_ok=True)
+    except Exception:
+        pass
+
+    from playwright.sync_api import sync_playwright
+
+    _PERSIST_PW = sync_playwright().start()
+    chrome_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        # Off-screen damit Felix das Scrape-Fenster nicht sieht. Auf Windows
+        # ist alles < -1000 zuverlaessig ausserhalb. Plus kleines Fenster.
+        "--window-position=-3000,-3000",
+        "--window-size=900,600",
+    ]
+    # channel='chrome' bevorzugt die echte System-Chrome-Binary. Akamai
+    # toleriert sie besser als das gebundelte Chromium-Build. Fallback auf
+    # default (bundled) wenn Chrome nicht installiert ist.
+    try:
+        _PERSIST_CTX = _PERSIST_PW.chromium.launch_persistent_context(
+            user_data_dir=profile,
+            headless=False,
+            args=chrome_args,
+            channel="chrome",
+        )
+    except Exception as e:
+        logger.info('Persistent context: channel=chrome failed (%s) — fallback to bundled chromium', e)
+        try:
+            _PERSIST_CTX = _PERSIST_PW.chromium.launch_persistent_context(
+                user_data_dir=profile,
+                headless=False,
+                args=chrome_args,
+            )
+        except Exception as e2:
+            logger.warning('Persistent context launch failed: %s', e2)
+            try:
+                _PERSIST_PW.stop()
+            except Exception:
+                pass
+            _PERSIST_PW = None
+            return None
+
+    logger.info('Persistent context started (profile=%s)', profile)
+    return _PERSIST_CTX
+
+
+def _shutdown_persistent():
+    global _PERSIST_PW, _PERSIST_CTX
+    with _PERSIST_LOCK:
+        try:
+            if _PERSIST_CTX is not None:
+                _PERSIST_CTX.close()
+        except Exception:
+            pass
+        _PERSIST_CTX = None
+        try:
+            if _PERSIST_PW is not None:
+                _PERSIST_PW.stop()
+        except Exception:
+            pass
+        _PERSIST_PW = None
+
+
+atexit.register(_shutdown_persistent)
+
+
+def fetch_ebay_via_persistent(url: str, timeout_ms: int = 20_000) -> str | None:
+    """Holt <url> ueber den persistenten Off-Screen-Chrome. Returnt HTML
+    oder None bei Block/Fehler.
+
+    Konkurrenz: _PERSIST_LOCK serialisiert alle Aufrufe — der Background-
+    Refresh-Loop und User-Manual-Clicks teilen sich einen Chrome.
+    """
+    global _PERSIST_LAST_USE, _PERSIST_DISABLED, _PERSIST_DISABLED_UNTIL
+
+    if not _persistent_available():
+        return None
+
+    with _PERSIST_LOCK:
+        ctx = _ensure_persistent_context()
+        if ctx is None:
+            # konnte nicht starten — kurz disable
+            _PERSIST_DISABLED = True
+            _PERSIST_DISABLED_UNTIL = time.time() + 120
+            return None
+
+        html = ''
+        page = None
+        try:
+            page = ctx.new_page()
+            page.goto(url, wait_until='domcontentloaded', timeout=timeout_ms)
+            # eBay-Item-Seiten sind 100kB+ vollgeladen; Akamai-Splash ist <40kB.
+            try:
+                page.wait_for_function(
+                    "() => document.body && document.body.innerHTML.length > 40000",
+                    timeout=6_000,
+                )
+            except Exception:
+                pass
+            html = page.content() or ''
+        except Exception as e:
+            logger.warning('persistent fetch goto failed for %s: %s', url, e)
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            _PERSIST_LAST_USE = time.time()
+
+        if not html:
+            return None
+        if _ebay_response_is_blocked(html):
+            logger.info('persistent fetch: Akamai splash for %s (len=%d)', url, len(html))
+            return None
+        if len(html) < 5_000:
+            logger.info('persistent fetch: HTML too short for %s (len=%d)', url, len(html))
+            return None
+        return html
+
+
+def fetch_ebay_via_cdp(url: str, timeout_ms: int = 25_000) -> str | None:
+    """Open <url> in the running App-Chrome (via CDP), return rendered HTML.
+
+    Returns None if CDP is unavailable, the page didn't load, or eBay's
+    Akamai-splash was detected. Caller falls back to other strategies.
+
+    The new tab opens in the same window the user already sees — they'll
+    notice a brief flash but the tab auto-closes within ~5-15s.
+    """
+    if not _cdp_available():
+        return None
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.debug('CDP fetch: Playwright not installed')
+        return None
+
+    html = ''
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.connect_over_cdp(_cdp_endpoint())
+            except Exception as e:
+                logger.warning('CDP connect failed: %s', e)
+                return None
+
+            # Use the existing default context so Felix' cookies are shared.
+            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = ctx.new_page()
+            try:
+                page.goto(url, wait_until='domcontentloaded', timeout=timeout_ms)
+                # eBay items have a lot of JS — wait for body to have real content.
+                # Akamai-splash is small (<40 kB), real page is 100 kB+.
+                try:
+                    page.wait_for_function(
+                        "() => document.body && document.body.innerHTML.length > 40000",
+                        timeout=8_000,
+                    )
+                except Exception:
+                    # Page might be short but real (auction ended, etc.) — proceed.
+                    pass
+                html = page.content() or ''
+            except Exception as e:
+                logger.warning('CDP goto failed for %s: %s', url, e)
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
+            # browser.close() on a CDP connection only disconnects the client —
+            # it does NOT terminate the underlying Chrome (the App's main window).
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+        if _ebay_response_is_blocked(html):
+            logger.info('CDP fetch: Akamai splash detected for %s (len=%d)', url, len(html))
+            return None
+        if len(html) < 5_000:
+            logger.info('CDP fetch: HTML too short for %s (len=%d) — likely blocked', url, len(html))
+            return None
+        return html
+    except Exception as e:
+        logger.warning('CDP fetch unexpected error for %s: %s', url, e)
+        return None
+
+
+def refresh_ebay_item(url: str) -> dict | None:
+    """Fetch a single eBay item page and parse current price + bid count.
+    Used for the modal's "Jetzt aktualisieren" button so users can poll
+    a live auction faster than the scheduled scrape interval.
+
+    Strategy (Iter. 30):
+      1. Persistent off-screen Chromium (verified 2026-05-25 to bypass Akamai
+         with a 787kB real page) — primary path.
+      2. CDP via App-Chrome (Iter. 29 fallback for the rare case it actually
+         works, e.g. when Felix' Default-Chrome is NOT open).
+      3. Plain requests — last resort, almost always blocked.
+      4. If everything is blocked, return {'blocked': True} so the UI is honest.
+
+    Returns a dict containing ONLY the fields we could actually parse — keys
+    are omitted (not set to None) when parsing fails, so the caller can do a
+    safe `.update()` without wiping existing values. Returns None only if the
+    HTTP request itself failed completely.
+    """
+    # ── Attempt 1: Persistent off-screen Chromium ────────────────────────────
+    persist_html = fetch_ebay_via_persistent(url)
+    if persist_html:
+        parsed = parse_ebay_item_page_html(persist_html)
+        if parsed:
+            logger.info('refresh_ebay_item: parsed via persistent for %s (fields=%s)',
+                        url, sorted(parsed.keys()))
+            return parsed
+        logger.info('refresh_ebay_item: persistent HTML had nothing parseable for %s', url)
+
+    # ── Attempt 2: CDP via App-Chrome (Iter. 29 legacy backup) ───────────────
+    cdp_html = fetch_ebay_via_cdp(url)
+    if cdp_html:
+        parsed = parse_ebay_item_page_html(cdp_html)
+        if parsed:
+            logger.info('refresh_ebay_item: parsed via CDP for %s (fields=%s)',
+                        url, sorted(parsed.keys()))
+            return parsed
+        logger.info('refresh_ebay_item: CDP HTML had nothing parseable for %s', url)
+
+    # ── Attempt 3: plain requests (legacy path) ──────────────────────────────
+    import requests
+    session = requests.Session()
+    session.headers.update(_BIG_SHOP_HEADERS)
+    try:
+        session.get('https://www.ebay.de/', timeout=10)
+        r = session.get(url, timeout=15)
+        if r.status_code != 200:
+            logger.warning('refresh_ebay_item HTTP %s for %s', r.status_code, url)
+            return None
+    except Exception as e:
+        logger.warning('refresh_ebay_item HTTP fail: %s', e)
+        return None
+
+    # Iter. 26: Akamai splash detection
+    if _ebay_response_is_blocked(r.text) or len(r.text) < 40_000:
+        logger.info('refresh_ebay_item: eBay returned splash/short page for %s (len=%d) — treating as blocked',
+                    url, len(r.text))
+        return {'blocked': True}
+
+    return parse_ebay_item_page_html(r.text)
 
 
 def scrape_ebay(targets: list[dict]) -> list[dict]:

@@ -2410,3 +2410,145 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
     grid-column: 1 / -1;
   }
 }
+
+/* ═══ Iter. 29: Bookmarklet-Sync Setup-Bereich ═══════════════════════ */
+.sync-setup {
+  margin-top: 1rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid rgba(244, 114, 182, 0.22);
+  background: linear-gradient(
+    180deg,
+    rgba(244, 114, 182, 0.04),
+    rgba(139, 92, 246, 0.04)
+  );
+  border-radius: 12px;
+}
+
+.sync-setup[open] {
+  background: linear-gradient(
+    180deg,
+    rgba(244, 114, 182, 0.07),
+    rgba(139, 92, 246, 0.06)
+  );
+}
+
+.sync-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-weight: 600;
+  color: #f0e9ff;
+  list-style: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sync-summary::-webkit-details-marker { display: none; }
+
+.sync-summary::after {
+  content: '▾';
+  margin-left: auto;
+  color: #a78bfa;
+  font-size: 0.9rem;
+  transition: transform 0.18s ease;
+}
+
+.sync-setup[open] .sync-summary::after { transform: rotate(180deg); }
+
+.sync-body {
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px dashed rgba(244, 114, 182, 0.22);
+  color: #d2cee5;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.sync-explain {
+  margin: 0 0 0.7rem;
+  color: #d2cee5;
+}
+
+.sync-explain b {
+  color: #fbbf24;
+  font-weight: 700;
+}
+
+.sync-steps {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.sync-steps li {
+  margin-bottom: 0.55rem;
+}
+
+.sync-steps li:last-child { margin-bottom: 0; }
+
+.sync-steps b {
+  color: #f472b6;
+}
+
+.sync-steps kbd {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.78rem;
+  color: #e2dffa;
+}
+
+/* Der Drag-Link selbst — sieht aus wie ein Button, ist aber ein <a> mit
+   draggable=true, damit Felix es in die Lesezeichen-Leiste ziehen kann. */
+.sync-bookmarklet {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.32rem 0.7rem;
+  background: linear-gradient(135deg, #f472b6, #8b5cf6);
+  color: #fff !important;
+  font-weight: 700;
+  font-size: 0.85rem;
+  text-decoration: none;
+  border-radius: 8px;
+  border: 1px solid rgba(244, 114, 182, 0.6);
+  box-shadow: 0 4px 12px rgba(244, 114, 182, 0.25);
+  cursor: grab;
+  transition: transform 0.12s ease, box-shadow 0.18s ease;
+  -webkit-user-drag: element;
+  vertical-align: middle;
+}
+
+.sync-bookmarklet:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(244, 114, 182, 0.35);
+}
+
+.sync-bookmarklet:active {
+  cursor: grabbing;
+  transform: translateY(0);
+}
+
+.sync-bookmarklet .btn-icon-svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Inline "Code kopieren" link in den Steps */
+.btn-link {
+  background: none;
+  border: none;
+  color: #a78bfa;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.btn-link:hover {
+  color: #c4b5fd;
+}

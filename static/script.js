@@ -2283,6 +2283,64 @@ loadDashboard = async function (...args) {
   hydrateSparklines();
 };
 
+/* ═══ ITER. 29: Bookmarklet-Sync ═══════════════════════════════════════
+   eBay blockt unsere Direkt-Requests mit Akamai. Workaround: ein Bookmarklet
+   das Felix EINMAL in seiner Lesezeichen-Leiste speichert. Klick darauf im
+   eBay-Tab → fetch() schickt das geladene HTML (inkl. Login-Cookie-Auth) an
+   unsere localhost-API → wir parsen Gebote + Preis serverseitig.
+
+   Der Code muss kompakt sein (Bookmarklet-Limit ~2 KB). 'text/plain' als
+   Content-Type macht's zum "simple CORS request" — Browser sendet keinen
+   Preflight, was viele CSP-Probleme umgeht. */
+function _buildBookmarkletCode() {
+  // Backend-Origin dynamisch — funktioniert auch wenn Felix den Port aendert.
+  const apiOrigin = `${location.protocol}//${location.host}`;
+  // IIFE-Body — bewusst kurz, ohne unnoetigen Whitespace.
+  // Item-ID-Extraktion: ?item=NNN ODER /NNN/ ODER /itm/NNN ODER itemId="NNN".
+  const src = `(async()=>{try{const u=new URL(location.href);` +
+    `const q=u.searchParams.get('item');` +
+    `const p=(u.pathname.match(/\\b(\\d{10,15})\\b/)||[])[1];` +
+    `const m=(document.documentElement.outerHTML.match(/itemId["':\\s]+(\\d{10,15})/)||[])[1];` +
+    `const id=q||p||m||'';` +
+    `const r=await fetch('${apiOrigin}/api/ebay-paste-html'+(id?'?item='+id:''),` +
+    `{method:'POST',headers:{'Content-Type':'text/plain'},body:document.documentElement.outerHTML,mode:'cors'});` +
+    `const d=await r.json();` +
+    `if(d.ok){const f=(d.fields_updated||[]).join(', ')||'-';` +
+    `alert('OK DealScraper-Sync\\n\\nGebote: '+(d.bids_imported||0)+'\\nFelder: '+f+'\\nDeal-ID: '+d.deal_id)}` +
+    `else{alert('FEHLER DealScraper-Sync\\n\\n'+(d.error||'Unbekannt'))}` +
+    `}catch(e){alert('FEHLER DealScraper-Sync\\n\\n'+e.message+` +
+    `'\\n\\nLaeuft die App? Bei CSP-Block den manuellen Paste-Pfad nutzen.')}})()`;
+  return 'javascript:' + encodeURI(src);
+}
+
+function _initBookmarkletUI() {
+  const a = document.getElementById('sync-bookmarklet');
+  const copyBtn = document.getElementById('sync-copy-btn');
+  if (!a) return;
+  const code = _buildBookmarkletCode();
+  a.setAttribute('href', code);
+  a.addEventListener('click', e => {
+    // Browser laesst javascript: hrefs aus normalen Klicks oft nicht zu
+    // (security feature). Drag in die Lesezeichen-Leiste funktioniert immer.
+    e.preventDefault();
+    toast('Ziehe diesen Button in die Lesezeichen-Leiste — Klick ist hier deaktiviert.', 'info');
+  });
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(code);
+        toast('Bookmarklet-Code kopiert. In Chrome: Strg+D → URL ersetzen.', 'success');
+      } catch {
+        // Fallback fuer geblockte Clipboard-API: in textarea + manuelles Copy
+        const ta = document.createElement('textarea');
+        ta.value = code; document.body.appendChild(ta);
+        ta.select(); document.execCommand('copy'); ta.remove();
+        toast('Bookmarklet-Code kopiert (Fallback).', 'success');
+      }
+    });
+  }
+}
+
 /* ═══ INIT ══════════════════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
   loadDashboard();
@@ -2343,6 +2401,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('auction-modal')?.addEventListener('click', e => {
     if (e.target.id === 'auction-modal') closeAuctionModal();
   });
+  _initBookmarkletUI();   // Iter. 29: Bookmarklet-Sync ein-Klick-Aktualisierung
   document.getElementById('auction-modal-refresh')?.addEventListener('click', e => {
     refreshAuctionDeal(e.currentTarget);
   });
