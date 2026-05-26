@@ -303,12 +303,12 @@ def main():
             pass
 
     browser = _find_browser()
+    cdp_port = CONFIG.get("cdp_port", 9222)
     if browser:
         # Iter. 29: Chrome bekommt CDP-Port + Anti-Automation-Flag damit die
         # App den User-Browser als eBay-Renderer benutzen kann (umgeht Akamai
         # weil dieser Browser Felix' echte Login-Cookies + Browser-Fingerprint
         # mitbringt). Siehe scraper.fetch_ebay_via_cdp.
-        cdp_port = CONFIG.get("cdp_port", 9222)
         subprocess.Popen([
             browser,
             "--app={}".format(URL),
@@ -324,11 +324,27 @@ def main():
     else:
         webbrowser.open(URL)
 
+    # Iter. 31: System-Tray haelt den Prozess am Leben — wenn Felix das Chrome-
+    # Fenster zumacht laeuft die App im Hintergrund weiter (Background-Refresh,
+    # Geocode etc. ticken durch). Tray-Menu erlaubt erneutes Oeffnen, manuellen
+    # Scrape und sauberes Beenden inkl. Persistent-Chromium-Shutdown.
+    def _on_tray_quit():
+        try:
+            import scraper
+            scraper._shutdown_persistent()
+        except Exception:
+            pass
     try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
+        from tray import AppTray
+        AppTray(URL, browser, cdp_port=cdp_port, on_quit=_on_tray_quit).run()
+    except Exception as e:
+        # Fallback wenn pystray fehlt / krasht: alte passive Schleife
+        print(f"[Tray] Start fehlgeschlagen ({e}) — bleibe passiv im Hintergrund")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

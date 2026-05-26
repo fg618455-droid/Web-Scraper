@@ -5,3 +5,4 @@ lxml>=5.0
 playwright>=1.44
 plyer>=2.1
 pillow>=10.0
+pystray>=0.19

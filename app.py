@@ -82,6 +82,34 @@ def favicon():
 def api_health():
     return jsonify({'ok': True, 'ts': datetime.now().isoformat()})
 
+
+@app.route('/api/debug/scraper-state')
+def api_debug_scraper_state():
+    """Iter. 31: Beweis-Endpoint — sagt welcher Akamai-Bypass-Pfad gerade live ist.
+    Hilft beim Verifizieren nach Update / Setup-Wechsel ohne im Code zu graben.
+    """
+    profile = os.environ.get('DEALSCRAPER_PROFILE_PATH', '') or ''
+    try:
+        from ebay_session import has_session as _ebay_has_session
+        have_login = bool(_ebay_has_session())
+    except Exception:
+        have_login = False
+    persist_disabled_until = getattr(scraper, '_PERSIST_DISABLED_UNTIL', 0.0)
+    last_use = getattr(scraper, '_PERSIST_LAST_USE', 0.0)
+    return jsonify({
+        'persistent_available':   scraper._persistent_available(),
+        'cdp_available':          scraper._cdp_available(),
+        'have_login':             have_login,
+        'profile_path':           profile,
+        'profile_path_exists':    bool(profile) and os.path.isdir(profile),
+        'persist_disabled':       bool(getattr(scraper, '_PERSIST_DISABLED', False)),
+        'persist_disabled_until': persist_disabled_until,
+        'last_persistent_use':    last_use,
+        'cdp_port':               os.environ.get('DEALSCRAPER_CDP_PORT', ''),
+        'scraping':               bool(scraper.STATUS.get('scraping')),
+        'last_scrape':            scraper.STATUS.get('last_scrape'),
+    })
+
 # Interval is loaded from DB after init_db() in _init_interval() below.
 scrape_interval_minutes: int = 240
 _timer: threading.Timer | None = None
@@ -194,13 +222,28 @@ def _do_scrape(target: dict | None = None,
         restrict       = None
         reschedule     = True
     try:
-        scraper.run_scrape(callback=_build_callback(restrict), targets=scrape_targets)
+        deals = scraper.run_scrape(callback=_build_callback(restrict), targets=scrape_targets)
     except Exception as e:
         logger.exception('Scrape failed: %s', e)
         scraper.STATUS['scraping'] = False
+        deals = []
     finally:
         if reschedule:
             _schedule_next()
+            # Iter. 31: Tray-Notification am Ende eines globalen Scrapes.
+            # Nur fuer den globalen Pfad — Per-Target/Per-Group-Clicks waeren
+            # zu spammy weil sie sekuendlich passieren koennen.
+            try:
+                n = len(deals) if deals else 0
+                ok_sites = sum(1 for s in scraper.STATUS.get('sites', {}).values()
+                               if s.get('ok'))
+                total_sites = len(scraper.STATUS.get('sites', {}) or {})
+                send_notification(
+                    'Scrape fertig',
+                    f'{n} Deals · {ok_sites}/{total_sites} Quellen OK',
+                )
+            except Exception:
+                pass
 
 
 def _schedule_next() -> None:
@@ -422,6 +465,14 @@ def _start_geocode_thread() -> None:
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/scrape-window')
+def scrape_window():
+    """Iter. 31: Mini-Floating-Fenster fuer Scrape-Status. Wird vom Tray-Menu
+    als kleines Chrome --app=...380x540 geoeffnet. Pollt /api/status alle 2s.
+    """
+    return render_template('scrape_window.html')
 
 
 @app.route('/api/deals/<int:deal_id>')
