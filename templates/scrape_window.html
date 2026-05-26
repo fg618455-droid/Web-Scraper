@@ -221,7 +221,17 @@ $('btn-scrape').addEventListener('click', async () => {
   } catch (e) {}
   setTimeout(refresh, 400);
 });
-$('btn-open').addEventListener('click', () => { window.open('/', '_blank'); });
+$('btn-open').addEventListener('click', async () => {
+  // Iter. 34+: ruft /api/window/show um das pywebview-Hauptfenster nach vorn
+  // zu holen, statt window.open() (das wuerde einen Default-Browser-Tab oeffnen).
+  try {
+    await fetch('/api/window/show', { method: 'POST' });
+  } catch (e) {
+    // Fallback wenn /api/window/show nicht existiert (alte Server-Version):
+    // dann doch window.open — besser als nichts.
+    try { window.open('/', '_blank'); } catch (_) {}
+  }
+});
 
 refresh();
 setInterval(refresh, 2000);
