@@ -103,7 +103,7 @@ class AppTray:
         try:
             subprocess.Popen(self._chrome_args(
                 self.url,
-                ['--start-fullscreen', '--start-maximized'],
+                ['--start-maximized'],
             ))
         except Exception:
             import webbrowser

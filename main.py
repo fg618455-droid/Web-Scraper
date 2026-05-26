@@ -276,10 +276,12 @@ def main():
         print(f"DealScraper laeuft bereits auf {URL} — oeffne nur das Fenster.")
         browser = _find_browser()
         if browser:
+            # Iter. 31 fix: --start-fullscreen verdeckte die Taskleiste und
+            # damit das Tray-Icon. --start-maximized allein liefert ein
+            # randloses grosses Fenster, ohne die Taskleiste zu killen.
             subprocess.Popen([
                 browser,
                 "--app={}".format(URL),
-                "--start-fullscreen",
                 "--start-maximized",
                 "--disable-extensions",
             ])
@@ -312,7 +314,6 @@ def main():
         subprocess.Popen([
             browser,
             "--app={}".format(URL),
-            "--start-fullscreen",
             "--start-maximized",
             "--disable-extensions",
             f"--remote-debugging-port={cdp_port}",
