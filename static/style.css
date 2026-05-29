@@ -50,6 +50,7 @@
   --shadow-glow: 0 0 32px rgba(129, 140, 248, 0.25);
   --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  color-scheme: dark;
 }
 
 html, body { height: 100%; }
@@ -1954,6 +1955,9 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .target-edit-input::placeholder { color: var(--text-dim); }
+.target-edit-input[type=number]::-webkit-inner-spin-button,
+.target-edit-input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.target-edit-input[type=number] { -moz-appearance: textfield; }
 .target-edit-row .input-suffix {
   position: absolute;
   right: 0.45rem;

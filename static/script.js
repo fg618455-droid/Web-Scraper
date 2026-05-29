@@ -1007,18 +1007,8 @@ async function loadDrawerTargets() {
           <input class="target-edit-input" data-field="group_name" value="${esc(t.group_name || '')}"
                  placeholder="Gruppe…" list="group-suggestions" />
           <div class="input-with-suffix">
-            <input class="target-edit-input" data-field="retail_price" type="number" min="0" step="1"
-                   value="${t.retail_price ?? ''}" placeholder="UVP" />
-            <span class="input-suffix">€</span>
-          </div>
-          <div class="input-with-suffix">
-            <input class="target-edit-input" data-field="min_price" type="number" min="0" step="1"
-                   value="${t.min_price ?? ''}" placeholder="Min" title="Mindestpreis – Angebote darunter gelten als Fake und werden ausgeblendet" />
-            <span class="input-suffix">€</span>
-          </div>
-          <div class="input-with-suffix">
             <input class="target-edit-input" data-field="wish_price" type="number" min="0" step="1"
-                   value="${t.wish_price ?? ''}" placeholder="Wunsch" title="Wunschpreis – Angebote darunter werden mit Gold-Rand markiert" />
+                   value="${t.wish_price ?? ''}" placeholder="Wunsch €" title="Wunschpreis – Angebote darunter werden mit Gold-Rand markiert" />
             <span class="input-suffix">€</span>
           </div>
         </div>
@@ -1032,11 +1022,7 @@ async function loadDrawerTargets() {
         const field  = e.target.dataset.field;
         const raw    = e.target.value.trim();
         let body;
-        if (field === 'retail_price') {
-          body = { retail_price: raw === '' ? null : parseFloat(raw) };
-        } else if (field === 'min_price') {
-          body = { min_price: raw === '' ? null : parseFloat(raw) };
-        } else if (field === 'wish_price') {
+        if (field === 'wish_price') {
           body = { wish_price: raw === '' ? null : parseFloat(raw) };
         } else {
           body = { group_name: raw || null };
