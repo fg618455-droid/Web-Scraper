@@ -191,6 +191,28 @@ BROWSER_CANDIDATES = [
 ]
 
 
+def _git_pull_and_restart():
+    """Im Dev-Modus: git pull holen. Wenn neue Commits da sind, neu starten.
+    Laeuft NUR wenn sys.frozen=False (also python main.py, kein .exe).
+    Schlaegt lautlos fehl wenn git nicht verfuegbar oder kein Netz."""
+    if getattr(sys, 'frozen', False):
+        return
+    try:
+        result = subprocess.run(
+            ['git', 'pull', '--ff-only', '--quiet'],
+            capture_output=True, text=True, timeout=15,
+            cwd=BASE_DIR,
+        )
+        if result.returncode == 0 and 'Already up to date' not in result.stdout:
+            # Neuer Code ist da — mit pythonw neu starten (kein Konsolenfenster)
+            pythonw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+            launcher = pythonw if os.path.isfile(pythonw) else sys.executable
+            subprocess.Popen([launcher, os.path.join(BASE_DIR, 'main.py')])
+            sys.exit(0)
+    except Exception:
+        pass
+
+
 def _run_flask():
     flask_app.run(host=HOST, port=PORT, debug=False,
                   use_reloader=False, threaded=True)
@@ -643,6 +665,10 @@ def _chrome_app_fallback():
 
 
 def main():
+    # Auto-Update im Dev-Modus: git pull + Neustart wenn neue Commits da sind.
+    # Laeuft vor allem anderen, damit die neue Version sofort aktiv ist.
+    _git_pull_and_restart()
+
     # Iter. 35 Stufe B: Taskbar/Windows-Identitaet. Muss VOR dem ersten Window-
     # Create laufen damit Windows den Prozess als eigene App gruppiert (sonst
     # erbt die Taskleiste das python.exe-Icon).
