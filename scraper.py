@@ -1431,13 +1431,17 @@ _PERSIST_SITES = {
     # Akamai-walled (in Iter. 36 reproduzierbar Status='blocked')
     'eBay', 'Saturn', 'Idealo', 'Chrono24', 'Kaufland',
     'Fossil', 'Skagen',
+    # DataDome-walled
+    'Etsy', 'Zalando', 'AboutYou', 'Asos', 'BestSecret', 'Veepee',
     # Vermutlich bot-walled — wir geben ihnen via Persistent eine zweite Chance.
-    # Wenn sie eh ueber den batch-Pfad durchkommen (status='empty'), schadet
-    # Persistent nicht; die parser_fn ist dieselbe. Aber sobald Akamai/DD
-    # in Aktion tritt, sind sie hier abgesichert.
     'Coolblue', 'Galaxus', 'Computeruniverse', 'Cyberport', 'Gravis',
-    'notebooksbilliger', 'Backmarket',
+    'notebooksbilliger', 'Backmarket', 'Breuninger',
+    # Uhren/Accessoires (oft CF/DataDome)
     'Christ', 'Chronext', 'Valmano', 'Watchshop',
+    'Uhrzeit.org', 'Uhrinstinkt', 'Brandfield', 'Wardow', 'Fashionette',
+    'Kapten-Son', 'Liebeskind-Berlin',
+    # Beauty (oft DataDome/Cloudflare)
+    'Douglas', 'Flaconi', 'Notino', 'Parfumdreams', 'Sephora',
 }
 
 
@@ -4076,7 +4080,9 @@ _DEFAULT_TARGETS = [
 ]
 
 
-def run_scrape(callback=None, targets=None) -> list[dict]:
+def run_scrape(callback=None, targets=None,
+               color: str | None = None,
+               extra: str | None = None) -> list[dict]:
     STATUS['scraping'] = True
     all_deals: list[dict] = []
 
@@ -4126,6 +4132,23 @@ def run_scrape(callback=None, targets=None) -> list[dict]:
     STATUS['last_scrape'] = datetime.now().isoformat()
     STATUS['scraping']    = False
     _set_current()  # Iter. 36: clear live-progress hint
+
+    # Optional post-collection filters (case-insensitive, applied to title+description)
+    if color:
+        color_lower = color.lower()
+        all_deals = [
+            d for d in all_deals
+            if color_lower in (d.get('title') or '').lower()
+            or color_lower in (d.get('description') or '').lower()
+        ]
+        logger.info('color filter %r: %d deals remaining', color, len(all_deals))
+    if extra:
+        extra_lower = extra.lower()
+        all_deals = [
+            d for d in all_deals
+            if extra_lower in (d.get('title') or '').lower()
+        ]
+        logger.info('extra filter %r: %d deals remaining', extra, len(all_deals))
 
     if callback:
         try:

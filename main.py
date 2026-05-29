@@ -271,26 +271,93 @@ def check_updates_and_prompt():
         return  # Dev-Mode: kein In-Place-Update moeglich, Dialog weglassen
     try:
         import tkinter as tk
-        from tkinter import messagebox
-        from updater import check_for_updates, download_and_update
+        from tkinter import ttk, scrolledtext
+        from updater import check_for_updates, download_and_update, get_current_version
 
         latest_version, release_data = check_for_updates()
-        if latest_version and release_data:
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
+        if not (latest_version and release_data):
+            return
 
-            result = messagebox.askyesno(
-                "Update verfuegbar!",
-                "Eine neue Version (v{}) des Deal Scrapers ist verfuegbar."
-                "\n\nJetzt automatisch herunterladen und installieren?"
-                " Die App startet danach mit der neuen Version neu."
-                .format(latest_version)
-            )
+        current_version = get_current_version()
+        changelog = (release_data.get('body') or '').strip()
+        # Truncate very long changelogs to avoid an oversized dialog
+        if len(changelog) > 800:
+            changelog = changelog[:800] + '\n...'
 
-            if result:
-                download_and_update(release_data, latest_version)
+        root = tk.Tk()
+        root.title('Update verfügbar')
+        root.resizable(False, False)
+        root.attributes('-topmost', True)
+
+        # Center on screen
+        root.update_idletasks()
+        w, h = 480, 380 if changelog else 240
+        x = (root.winfo_screenwidth()  - w) // 2
+        y = (root.winfo_screenheight() - h) // 2
+        root.geometry(f'{w}x{h}+{x}+{y}')
+
+        _result = {'do_update': False}
+
+        frame = tk.Frame(root, padx=16, pady=12)
+        frame.pack(fill='both', expand=True)
+
+        tk.Label(frame, text='🆕  Neue Version verfügbar',
+                 font=('Segoe UI', 13, 'bold')).pack(anchor='w')
+
+        ver_frame = tk.Frame(frame)
+        ver_frame.pack(anchor='w', pady=(6, 0))
+        tk.Label(ver_frame, text=f'Aktuell:  v{current_version}',
+                 fg='gray', font=('Segoe UI', 10)).pack(side='left', padx=(0, 20))
+        tk.Label(ver_frame, text=f'Neu:  v{latest_version}',
+                 fg='#1a7f1a', font=('Segoe UI', 10, 'bold')).pack(side='left')
+
+        if changelog:
+            tk.Label(frame, text='Was ist neu:', font=('Segoe UI', 9, 'bold'),
+                     pady=6).pack(anchor='w')
+            txt = scrolledtext.ScrolledText(frame, height=10, width=56,
+                                            font=('Consolas', 8), wrap='word',
+                                            state='normal', relief='flat',
+                                            bg='#f5f5f5')
+            txt.insert('1.0', changelog)
+            txt.config(state='disabled')
+            txt.pack(fill='both', expand=True, pady=(0, 8))
+
+        # Loading label (hidden until update starts)
+        loading_var = tk.StringVar(value='')
+        loading_lbl = tk.Label(frame, textvariable=loading_var,
+                               fg='#0066cc', font=('Segoe UI', 9))
+        loading_lbl.pack(anchor='w', pady=(0, 2))
+
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(anchor='e')
+
+        def on_later():
             root.destroy()
+
+        def on_update():
+            _result['do_update'] = True
+            update_btn.config(state='disabled')
+            later_btn.config(state='disabled')
+            loading_var.set('⏳  Wird heruntergeladen und installiert …')
+            root.update()
+            root.destroy()
+
+        later_btn = tk.Button(btn_frame, text='Später', width=10,
+                              command=on_later, relief='flat',
+                              bg='#e0e0e0', activebackground='#c8c8c8')
+        later_btn.pack(side='left', padx=(0, 8))
+
+        update_btn = tk.Button(btn_frame, text='Jetzt updaten', width=14,
+                               command=on_update, relief='flat',
+                               bg='#0066cc', fg='white',
+                               activebackground='#0055aa', activeforeground='white',
+                               font=('Segoe UI', 9, 'bold'))
+        update_btn.pack(side='left')
+
+        root.mainloop()
+
+        if _result['do_update']:
+            download_and_update(release_data, latest_version)
     except Exception:
         pass
 

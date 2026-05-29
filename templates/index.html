@@ -195,6 +195,24 @@
   </div>
 </header>
 
+<!-- Update-Banner (hidden until /api/update/check finds a newer version) -->
+<div id="update-banner" class="update-banner hidden" role="alert">
+  <div class="update-banner-body">
+    <span class="update-badge">🆕 Update</span>
+    <span id="update-banner-text">Neue Version verfügbar</span>
+    <details id="update-changelog-details" class="update-changelog-details">
+      <summary>Changelog anzeigen</summary>
+      <pre id="update-changelog-pre" class="update-changelog-pre"></pre>
+    </details>
+  </div>
+  <div class="update-banner-actions">
+    <button id="update-later-btn" class="btn btn-secondary btn-sm">Später</button>
+    <button id="update-now-btn" class="btn btn-primary btn-sm">
+      <span id="update-now-spinner" class="hidden">⏳ </span>Jetzt updaten
+    </button>
+  </div>
+</div>
+
 <main id="dashboard">
   <div class="loading-skel">
     <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>

@@ -91,6 +91,55 @@ def api_health():
     return jsonify({'ok': True, 'ts': datetime.now().isoformat()})
 
 
+# ── Update-Check API (für Web-UI-Banner) ────────────────────────────────────
+
+@app.route('/api/update/check')
+def api_update_check():
+    """Check GitHub Releases for a newer version. Returns update info or null."""
+    try:
+        from updater import check_for_updates, get_current_version
+        current = get_current_version()
+        latest, release = check_for_updates()
+        if latest and release:
+            changelog = (release.get('body') or '').strip()
+            if len(changelog) > 600:
+                changelog = changelog[:600] + '\n…'
+            return jsonify({
+                'update_available': True,
+                'current_version':  current,
+                'latest_version':   latest,
+                'html_url':         release.get('html_url', ''),
+                'changelog':        changelog,
+            })
+        return jsonify({'update_available': False, 'current_version': current})
+    except Exception as e:
+        logger.warning('update check failed: %s', e)
+        return jsonify({'update_available': False, 'error': str(e)})
+
+
+@app.route('/api/update/install', methods=['POST'])
+def api_update_install():
+    """Trigger the in-place update in a background thread.
+    Only works when the app is running as a frozen .exe (sys.frozen=True).
+    """
+    try:
+        from updater import check_for_updates, download_and_update
+        _, release = check_for_updates()
+        if not release:
+            return jsonify({'error': 'Kein Update verfügbar'}), 404
+
+        def _do_update():
+            import time
+            time.sleep(0.5)  # allow HTTP response to reach the client first
+            download_and_update(release)
+
+        threading.Thread(target=_do_update, daemon=True, name='updater').start()
+        return jsonify({'ok': True, 'message': 'Update gestartet — App startet neu'})
+    except Exception as e:
+        logger.exception('update install failed: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
 # Iter. 34: main.py setzt das auf _show_main_window — wird vom Single-Instance-
 # Pfad genutzt um die laufende App in den Vordergrund zu holen.
 window_show_callback = None
@@ -238,7 +287,9 @@ process_deals = _build_callback()
 
 def _do_scrape(target: dict | None = None,
                targets: list | None = None,
-               label: str | None = None) -> None:
+               label: str | None = None,
+               color: str | None = None,
+               extra: str | None = None) -> None:
     """Run a scrape.
 
     Modes:
@@ -271,7 +322,8 @@ def _do_scrape(target: dict | None = None,
         restrict       = None
         reschedule     = True
     try:
-        deals = scraper.run_scrape(callback=_build_callback(restrict), targets=scrape_targets)
+        deals = scraper.run_scrape(callback=_build_callback(restrict), targets=scrape_targets,
+                                   color=color, extra=extra)
     except Exception as e:
         logger.exception('Scrape failed: %s', e)
         scraper.STATUS['scraping'] = False
@@ -669,7 +721,13 @@ def api_save_filter_settings():
 
 @app.route('/api/scrape', methods=['POST'])
 def api_scrape():
-    return jsonify(_enqueue_scrape())
+    data = request.get_json(force=True, silent=True) or {}
+    kwargs = {}
+    if data.get('color'):
+        kwargs['color'] = str(data['color']).strip() or None
+    if data.get('extra'):
+        kwargs['extra'] = str(data['extra']).strip() or None
+    return jsonify(_enqueue_scrape(**kwargs))
 
 
 @app.route('/api/scrape/<int:target_id>', methods=['POST'])
@@ -1491,8 +1549,41 @@ def _load_persisted_interval():
         scrape_interval_minutes = 240
 
 
-# Background auction-refresh starts as soon as the app module is imported
-# (i.e. from main.py too) — daemon thread dies with the process.
+# ── Lightweight 60-second auction-expiry thread ──────────────────────────────
+# Separate from the heavy auction-refresh loop (30 min): only calls
+# mark_expired_auctions() so the UI shows auctions as ended within ~1 min
+# of their deadline, without hammering eBay with extra requests.
+
+_expire_thread: threading.Thread | None = None
+_expire_stop = threading.Event()
+EXPIRE_CHECK_EVERY_SEC = 60
+
+
+def _expire_auctions_loop() -> None:
+    logger.info('Auction-expiry thread started (every %ds)', EXPIRE_CHECK_EVERY_SEC)
+    while not _expire_stop.wait(EXPIRE_CHECK_EVERY_SEC):
+        try:
+            n = db.mark_expired_auctions()
+            if n:
+                logger.info('Expiry check: %d auctions retired', n)
+        except Exception:
+            logger.exception('Auction-expiry check crashed')
+
+
+def _start_expire_thread() -> None:
+    global _expire_thread
+    if _expire_thread and _expire_thread.is_alive():
+        return
+    _expire_stop.clear()
+    _expire_thread = threading.Thread(
+        target=_expire_auctions_loop, daemon=True, name='auction-expiry'
+    )
+    _expire_thread.start()
+
+
+# Background threads start as soon as the app module is imported
+# (i.e. from main.py too) — daemon threads die with the process.
+_start_expire_thread()
 _start_auction_refresh()
 _start_geocode_thread()
 

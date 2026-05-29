@@ -2641,3 +2641,36 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
   color: #c4b5fd;
 }
 
+/* ── Update-Banner ──────────────────────────────────────────────────── */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 1.2rem;
+  background: linear-gradient(90deg, rgba(99,102,241,0.18) 0%, rgba(139,92,246,0.15) 100%);
+  border-bottom: 1px solid var(--accent-bdr);
+  font-size: 0.85rem;
+  flex-wrap: wrap;
+}
+.update-banner.hidden { display: none; }
+.update-banner-body { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; flex: 1; }
+.update-badge { font-weight: 700; color: var(--accent); white-space: nowrap; }
+.update-banner-actions { display: flex; gap: 0.5rem; align-items: center; flex-shrink: 0; }
+.btn-sm { padding: 0.25rem 0.65rem; font-size: 0.8rem; }
+.update-changelog-details { margin-top: 0.25rem; width: 100%; }
+.update-changelog-details summary { cursor: pointer; color: var(--accent); font-size: 0.78rem; }
+.update-changelog-pre {
+  margin-top: 0.4rem;
+  max-height: 160px;
+  overflow-y: auto;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-bdr);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-1);
+}
+

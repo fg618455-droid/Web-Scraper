@@ -2437,11 +2437,61 @@ function _initBookmarkletUI() {
   }
 }
 
+/* ── Update-Banner ──────────────────────────────────────────────────── */
+async function checkForUpdate() {
+  try {
+    const data = await api('/api/update/check');
+    if (!data.update_available) return;
+    const banner   = document.getElementById('update-banner');
+    const textEl   = document.getElementById('update-banner-text');
+    const pre      = document.getElementById('update-changelog-pre');
+    const details  = document.getElementById('update-changelog-details');
+    const spinner  = document.getElementById('update-now-spinner');
+    const nowBtn   = document.getElementById('update-now-btn');
+    const laterBtn = document.getElementById('update-later-btn');
+
+    textEl.textContent =
+      `v${data.current_version} → v${data.latest_version} verfügbar`;
+    if (data.changelog) {
+      pre.textContent = data.changelog;
+    } else {
+      details.style.display = 'none';
+    }
+    banner.classList.remove('hidden');
+
+    laterBtn.addEventListener('click', () => banner.classList.add('hidden'));
+
+    nowBtn.addEventListener('click', async () => {
+      nowBtn.disabled = true;
+      laterBtn.disabled = true;
+      spinner.classList.remove('hidden');
+      nowBtn.querySelector('span + .btn-label') &&
+        (nowBtn.lastChild.textContent = 'Installiere…');
+      try {
+        const res = await api('/api/update/install', { method: 'POST' });
+        if (res.ok) {
+          toast('Update gestartet — App startet gleich neu…', 'success');
+        } else {
+          toast(res.error || 'Update fehlgeschlagen', 'error');
+          nowBtn.disabled = false; laterBtn.disabled = false;
+          spinner.classList.add('hidden');
+        }
+      } catch {
+        toast('Update-Anfrage fehlgeschlagen', 'error');
+        nowBtn.disabled = false; laterBtn.disabled = false;
+        spinner.classList.add('hidden');
+      }
+    });
+  } catch { /* silent — update check is best-effort */ }
+}
+
 /* ═══ INIT ══════════════════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
   loadDashboard();
   updateStatus();
   setInterval(updateStatus, 15_000);
+  // Check for updates once on load (best-effort, only shows banner if update available)
+  setTimeout(checkForUpdate, 3_000);
 
   // Search
   const searchInput = document.getElementById('search-input');
