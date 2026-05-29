@@ -346,17 +346,13 @@ def _set_dark_title_bar(hwnd) -> bool:
                 break
 
         # Schritt 2: Titelleisten-Hintergrund = App-Bg #0a0c1c (COLORREF 0x001C0C0A)
-        # Schritt 3: Titelleisten-Text = helles Weiß #e5e9f5 (COLORREF 0x00F5E9E5)
-        bg_color   = ctypes.c_int(0x001C0C0A)
-        text_color = ctypes.c_int(0x00F5E9E5)
+        bg_color = ctypes.c_int(0x001C0C0A)
         dwmapi.DwmSetWindowAttribute(
             wintypes.HWND(hwnd), ctypes.c_uint(35),
             ctypes.byref(bg_color), ctypes.sizeof(bg_color)
         )
-        dwmapi.DwmSetWindowAttribute(
-            wintypes.HWND(hwnd), ctypes.c_uint(36),
-            ctypes.byref(text_color), ctypes.sizeof(text_color)
-        )
+        # Schritt 3: Titeltext leeren — steht sonst doppelt (Titelleiste + Nav-Bar)
+        ctypes.windll.user32.SetWindowTextW(wintypes.HWND(hwnd), '')
         return True
     except Exception as e:
         print(f"[DWM] title bar styling failed: {e}")
