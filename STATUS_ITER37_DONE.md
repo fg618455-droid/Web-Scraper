@@ -1,6 +1,23 @@
 # Iter. 37 — Status-Bericht für Felix
 
-> Autonom-Modus über Nacht, 2026-05-27. Branch: `main`. Tag: `v37` (geplant nach finaler Verifikation).
+> Autonom-Modus über Nacht, 2026-05-27 → 2026-05-29. Branch: `main`. Tag: `v37` ✅ gepusht (commit 30e81a1).
+> **Release v37 LIVE**: https://github.com/fg618455-droid/Web-Scraper/releases/tag/v37 (DealScraper-v37-windows-x64.zip, 365.5 MB)
+> GitHub Actions Build #14 = success — Felix kann die .exe direkt runterladen.
+
+## Live-Verifikation (run 6, 2026-05-29 02:20)
+
+Queue: Sport Uhr → Computer Apple → kein einziger crash mit dem Bug-#1/2/4-Fix-Stack.
+
+**Sport Uhr (Garmin Forerunner 265)**:
+- ✅ eBay (persistent): **38 deals**
+- ✅ Idealo (persistent): **1 deal**
+- ✅ Galaxus (persistent): **3 deals** (aria-label Parser-Fix wirkt)
+- ❌ Kaufland, Saturn, Chrono24, Fossil, Skagen: blocked (Akamai/DataDome)
+- batch: Otto 1, Amazon 3, MediaMarkt 3, Kleinanzeigen 10
+
+**Computer Apple (MacBook Air/Pro/mini M4) — direkt nach Sport Uhr**:
+- ✅ eBay (persistent): **164 deals** (3/3 keywords OK, Bug #4 fix bestätigt — Greenlet stirbt nicht)
+- (Weitere Sites scrapen noch beim Schreiben)
 
 ## TL;DR
 

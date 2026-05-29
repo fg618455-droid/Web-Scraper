@@ -14,5 +14,9 @@
       "Skill(obsidian-chat-summary)",
       "Skill(obsidian-chat-summary:*)"
     ]
+  },
+  "enabledPlugins": {
+    "typescript-lsp@claude-plugins-official": false,
+    "vercel@claude-plugins-official": false
   }
 }
