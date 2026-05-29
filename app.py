@@ -9,6 +9,7 @@ import logging
 import os
 import queue as _queue_mod
 import re
+import subprocess
 import threading
 import time
 from collections import defaultdict
@@ -1338,6 +1339,34 @@ def api_set_group_sources(group_name: str):
         return jsonify({'error': 'sources must be a list'}), 400
     db.set_group_sources(group_name, sources)
     return jsonify({'ok': True, 'group': group_name, 'sources': sources})
+
+
+_CHROME_PATHS = [
+    r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+    r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+]
+_NO_WIN = 0x08000000
+
+
+@app.route('/api/open', methods=['POST'])
+def api_open_url():
+    """Öffnet eine Deal-URL in Chrome als App-Fenster (kein Opera/Standard-Browser)."""
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get('url') or '').strip()
+    if not url.startswith(('http://', 'https://')):
+        return jsonify({'error': 'invalid url'}), 400
+    for path in _CHROME_PATHS:
+        if os.path.exists(path):
+            subprocess.Popen([path, f'--app={url}'], creationflags=_NO_WIN)
+            return jsonify({'ok': True, 'browser': 'chrome'})
+    # Fallback: Edge
+    edge = r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+    if os.path.exists(edge):
+        subprocess.Popen([edge, f'--app={url}'], creationflags=_NO_WIN)
+        return jsonify({'ok': True, 'browser': 'edge'})
+    import webbrowser
+    webbrowser.open(url)
+    return jsonify({'ok': True, 'browser': 'default'})
 
 
 @app.route('/api/dashboard')

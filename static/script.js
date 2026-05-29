@@ -2554,6 +2554,18 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('ebay-login-btn')?.addEventListener('click', startEbayLogin);
   document.getElementById('ebay-logout-btn')?.addEventListener('click', logoutEbay);
 
+  // Deal-Links in Chrome --app oeffnen statt Standard-Browser (Opera)
+  document.addEventListener('click', e => {
+    const a = e.target.closest('a[target="_blank"]');
+    if (!a || !a.href) return;
+    e.preventDefault();
+    fetch('/api/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: a.href }),
+    });
+  }, true);
+
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
