@@ -194,29 +194,24 @@ BROWSER_CANDIDATES = [
 _NO_WIN = 0x08000000  # CREATE_NO_WINDOW — verhindert jeden Terminal-Flash
 
 
-def _git_pull_and_restart():
-    """Im Dev-Modus: git pull holen. Wenn neue Commits da sind, neu starten.
-    Schlaegt absolut lautlos fehl (kein Fenster, kein Fehler sichtbar)."""
+def _git_pull_background():
+    """Im Dev-Modus: git pull still im Hintergrund. Kein Neustart, kein Flash.
+    Neuer Code ist beim naechsten App-Start aktiv."""
     if getattr(sys, 'frozen', False):
         return
-    try:
-        kw = dict(capture_output=True, text=True, cwd=BASE_DIR,
-                  creationflags=_NO_WIN)
 
-        before = subprocess.run(['git', 'rev-parse', 'HEAD'],
-                                timeout=5, **kw).stdout.strip()
-        subprocess.run(['git', 'pull', '--ff-only'], timeout=15, **kw)
-        after  = subprocess.run(['git', 'rev-parse', 'HEAD'],
-                                timeout=5, **kw).stdout.strip()
+    def _pull():
+        try:
+            subprocess.run(
+                ['git', 'pull', '--ff-only'],
+                capture_output=True, text=True,
+                timeout=20, cwd=BASE_DIR,
+                creationflags=_NO_WIN,
+            )
+        except Exception:
+            pass
 
-        if before and after and before != after:
-            pythonw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
-            launcher = pythonw if os.path.isfile(pythonw) else sys.executable
-            subprocess.Popen([launcher, os.path.join(BASE_DIR, 'main.py')],
-                             creationflags=_NO_WIN)
-            sys.exit(0)
-    except Exception:
-        pass
+    threading.Thread(target=_pull, daemon=True, name='git-pull').start()
 
 
 def _run_flask():
@@ -688,9 +683,8 @@ def main():
             pass  # Fenster konnte nicht aktiviert werden — kein Browser-Fallback
         return
 
-    # Auto-Update: nur wenn DIESE Instanz tatsaechlich startet (nicht bei
-    # Doppelklick waehrend App schon laeuft). Git pull + Neustart wenn noetig.
-    _git_pull_and_restart()
+    # Auto-Update: git pull still im Hintergrund, neuer Code beim naechsten Start.
+    _git_pull_background()
 
     check_updates_and_prompt()
 
