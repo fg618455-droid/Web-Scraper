@@ -191,34 +191,29 @@ BROWSER_CANDIDATES = [
 ]
 
 
+_NO_WIN = 0x08000000  # CREATE_NO_WINDOW — verhindert jeden Terminal-Flash
+
+
 def _git_pull_and_restart():
     """Im Dev-Modus: git pull holen. Wenn neue Commits da sind, neu starten.
-    Laeuft NUR wenn sys.frozen=False (also python main.py, kein .exe).
-    Schlaegt lautlos fehl wenn git nicht verfuegbar oder kein Netz."""
+    Schlaegt absolut lautlos fehl (kein Fenster, kein Fehler sichtbar)."""
     if getattr(sys, 'frozen', False):
         return
     try:
-        # Hash vor dem Pull merken
-        before = subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
-            capture_output=True, text=True, timeout=5, cwd=BASE_DIR,
-        ).stdout.strip()
+        kw = dict(capture_output=True, text=True, cwd=BASE_DIR,
+                  creationflags=_NO_WIN)
 
-        result = subprocess.run(
-            ['git', 'pull', '--ff-only'],
-            capture_output=True, text=True, timeout=15, cwd=BASE_DIR,
-        )
+        before = subprocess.run(['git', 'rev-parse', 'HEAD'],
+                                timeout=5, **kw).stdout.strip()
+        subprocess.run(['git', 'pull', '--ff-only'], timeout=15, **kw)
+        after  = subprocess.run(['git', 'rev-parse', 'HEAD'],
+                                timeout=5, **kw).stdout.strip()
 
-        after = subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
-            capture_output=True, text=True, timeout=5, cwd=BASE_DIR,
-        ).stdout.strip()
-
-        if result.returncode == 0 and before and after and before != after:
-            # Neuer Code ist da — mit pythonw neu starten (kein Konsolenfenster)
+        if before and after and before != after:
             pythonw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
             launcher = pythonw if os.path.isfile(pythonw) else sys.executable
-            subprocess.Popen([launcher, os.path.join(BASE_DIR, 'main.py')])
+            subprocess.Popen([launcher, os.path.join(BASE_DIR, 'main.py')],
+                             creationflags=_NO_WIN)
             sys.exit(0)
     except Exception:
         pass
@@ -676,10 +671,6 @@ def _chrome_app_fallback():
 
 
 def main():
-    # Auto-Update im Dev-Modus: git pull + Neustart wenn neue Commits da sind.
-    # Laeuft vor allem anderen, damit die neue Version sofort aktiv ist.
-    _git_pull_and_restart()
-
     # Iter. 35 Stufe B: Taskbar/Windows-Identitaet. Muss VOR dem ersten Window-
     # Create laufen damit Windows den Prozess als eigene App gruppiert (sonst
     # erbt die Taskleiste das python.exe-Icon).
@@ -696,6 +687,10 @@ def main():
         except Exception:
             pass  # Fenster konnte nicht aktiviert werden — kein Browser-Fallback
         return
+
+    # Auto-Update: nur wenn DIESE Instanz tatsaechlich startet (nicht bei
+    # Doppelklick waehrend App schon laeuft). Git pull + Neustart wenn noetig.
+    _git_pull_and_restart()
 
     check_updates_and_prompt()
 
