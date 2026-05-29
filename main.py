@@ -294,25 +294,47 @@ _WINDOW_TITLES = ('Deal Tracker', 'Deal Tracker — Scrape')
 
 
 def _set_dark_title_bar(hwnd) -> bool:
-    """Faerbt die Title-Bar des Fensters dunkel. Returnt True bei Erfolg."""
+    """Setzt Dark-Mode + App-Farbe auf die native Windows-Titelleiste (Win11+).
+
+    Zwei DWM-Attribute:
+      DWMWA_USE_IMMERSIVE_DARK_MODE (20/19) — dunkle Steuerelemente
+      DWMWA_CAPTION_COLOR (35)              — Hintergrundfarbe (Win11 22000+)
+      DWMWA_TEXT_COLOR    (36)              — Textfarbe (Win11 22000+)
+
+    App-Farbe #0a0c1c entspricht --bg-1 (Topbar-Farbe) → nahtlose Integration.
+    COLORREF-Format: 0x00BBGGRR.
+    """
     if not hwnd:
         return False
     try:
         import ctypes
         from ctypes import wintypes
-        value = ctypes.c_int(1)
         dwmapi = ctypes.windll.dwmapi
-        for attr in (20, 19):  # IMMERSIVE_DARK_MODE / _OLD
-            hr = dwmapi.DwmSetWindowAttribute(
-                wintypes.HWND(hwnd),
-                ctypes.c_uint(attr),
-                ctypes.byref(value),
-                ctypes.sizeof(value),
-            )
-            if hr == 0:
-                return True
+
+        # Schritt 1: Dark-Mode aktivieren (Controls werden hell/dunkel)
+        dark = ctypes.c_int(1)
+        for attr in (20, 19):
+            if dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd), ctypes.c_uint(attr),
+                ctypes.byref(dark), ctypes.sizeof(dark)
+            ) == 0:
+                break
+
+        # Schritt 2: Titelleisten-Hintergrund = App-Bg #0a0c1c (COLORREF 0x001C0C0A)
+        # Schritt 3: Titelleisten-Text = helles Weiß #e5e9f5 (COLORREF 0x00F5E9E5)
+        bg_color   = ctypes.c_int(0x001C0C0A)
+        text_color = ctypes.c_int(0x00F5E9E5)
+        dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(hwnd), ctypes.c_uint(35),
+            ctypes.byref(bg_color), ctypes.sizeof(bg_color)
+        )
+        dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(hwnd), ctypes.c_uint(36),
+            ctypes.byref(text_color), ctypes.sizeof(text_color)
+        )
+        return True
     except Exception as e:
-        print(f"[DWM] dark title bar failed: {e}")
+        print(f"[DWM] title bar styling failed: {e}")
     return False
 
 
