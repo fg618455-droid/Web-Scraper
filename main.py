@@ -198,12 +198,23 @@ def _git_pull_and_restart():
     if getattr(sys, 'frozen', False):
         return
     try:
+        # Hash vor dem Pull merken
+        before = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, timeout=5, cwd=BASE_DIR,
+        ).stdout.strip()
+
         result = subprocess.run(
-            ['git', 'pull', '--ff-only', '--quiet'],
-            capture_output=True, text=True, timeout=15,
-            cwd=BASE_DIR,
+            ['git', 'pull', '--ff-only'],
+            capture_output=True, text=True, timeout=15, cwd=BASE_DIR,
         )
-        if result.returncode == 0 and 'Already up to date' not in result.stdout:
+
+        after = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, timeout=5, cwd=BASE_DIR,
+        ).stdout.strip()
+
+        if result.returncode == 0 and before and after and before != after:
             # Neuer Code ist da — mit pythonw neu starten (kein Konsolenfenster)
             pythonw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
             launcher = pythonw if os.path.isfile(pythonw) else sys.executable
