@@ -136,7 +136,7 @@ svg { display: block; }
   background-clip: text;
   color: transparent;
 }
-.brand-text span { font-weight: 500; opacity: 0.85; }
+.brand-text span { font-weight: 400; color: var(--text-2); }
 
 /* Search */
 .search-wrap {
