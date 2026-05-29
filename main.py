@@ -244,6 +244,8 @@ def _find_browser():
 
 
 def check_updates_and_prompt():
+    if not getattr(__import__('sys'), 'frozen', False):
+        return  # Dev-Mode: kein In-Place-Update moeglich, Dialog weglassen
     try:
         import tkinter as tk
         from tkinter import messagebox
