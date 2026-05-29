@@ -1466,6 +1466,28 @@ def _persistent_available() -> bool:
         return False
 
 
+def _clear_chrome_window_placement(profile: str):
+    """Loescht gespeicherte Fensterposition aus dem Chrome-Profil.
+    Verhindert dass Chrome beim Start --window-position ignoriert."""
+    import json as _json
+    prefs_path = os.path.join(profile, 'Default', 'Preferences')
+    if not os.path.exists(prefs_path):
+        return
+    try:
+        with open(prefs_path, 'r', encoding='utf-8') as f:
+            prefs = _json.loads(f.read())
+        changed = False
+        for key in ('window_placement', 'last_known_google_url', 'last_session_exited_cleanly'):
+            if key in prefs.get('browser', {}):
+                del prefs['browser'][key]
+                changed = True
+        if changed:
+            with open(prefs_path, 'w', encoding='utf-8') as f:
+                f.write(_json.dumps(prefs))
+    except Exception as e:
+        logger.debug("Could not clear window placement: %s", e)
+
+
 def _ensure_persistent_context():
     """Lazy-startet sync_playwright + launch_persistent_context, cached fuer
     die Lifetime des Prozesses. Caller muss _PERSIST_LOCK bereits halten.
@@ -1502,16 +1524,20 @@ def _ensure_persistent_context():
 
     from playwright.sync_api import sync_playwright
 
+    # Gespeicherte Fensterposition aus dem Chrome-Profil loeschen, damit
+    # --window-position nicht vom Session-Restore ueberschrieben wird.
+    _clear_chrome_window_placement(profile)
+
     _PERSIST_PW = sync_playwright().start()
     chrome_args = [
         "--disable-blink-features=AutomationControlled",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-extensions",
-        # Off-screen damit Felix das Scrape-Fenster nicht sieht. Auf Windows
-        # ist alles < -1000 zuverlaessig ausserhalb. Plus kleines Fenster.
-        "--window-position=-3000,-3000",
-        "--window-size=900,600",
+        "--no-restore-session-state",
+        "--disable-session-crashed-bubble",
+        "--window-position=-9999,-9999",
+        "--window-size=1,1",
     ]
     # channel='chrome' bevorzugt die echte System-Chrome-Binary. Akamai
     # toleriert sie besser als das gebundelte Chromium-Build. Fallback auf

@@ -1143,7 +1143,8 @@ def get_top_deal_per_group() -> list[dict]:
             f'''SELECT ROUND(AVG(deals.price)) AS avg_price, COUNT(*) AS total_count
                 FROM deals
                 WHERE deals.model IN ({placeholders}) AND deals.available = 1
-                  AND deals.price <= 5000 AND ({_VISIBLE_SQL})''',
+                  AND deals.price <= 5000 AND ({_VISIBLE_SQL})
+                  AND COALESCE(deals.listing_type, 'fixed') != 'auction' ''',
             models,
         ).fetchone()
         avg_price  = avg_count['avg_price']
@@ -1152,7 +1153,10 @@ def get_top_deal_per_group() -> list[dict]:
             f'''SELECT deals.* FROM deals
                 WHERE deals.model IN ({placeholders}) AND deals.available = 1
                   AND deals.price <= 5000 AND ({_VISIBLE_SQL})
-                ORDER BY deals.price ASC LIMIT 1''',
+                ORDER BY
+                  CASE WHEN COALESCE(deals.listing_type, 'fixed') = 'auction' THEN 1 ELSE 0 END ASC,
+                  deals.price ASC
+                LIMIT 1''',
             models,
         ).fetchone()
         meta = group_meta[group_label]
