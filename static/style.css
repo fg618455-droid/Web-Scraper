@@ -1723,6 +1723,41 @@ td { padding: 0.48rem 0.85rem; vertical-align: middle; font-size: 0.82rem; }
 }
 .group-head-spacer { flex: 1; }
 
+/* Min-price inline editor in group header */
+.group-min-price-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 20px;
+  padding: 2px 6px 2px 8px;
+  white-space: nowrap;
+  cursor: text;
+  transition: border-color .15s, background .15s;
+}
+.group-min-price-wrap:focus-within {
+  border-color: rgba(99,102,241,.5);
+  background: rgba(99,102,241,.08);
+  color: var(--text);
+}
+.group-min-price-pfx { pointer-events: none; margin-right: 2px; }
+.group-min-price-input {
+  width: 42px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: inherit;
+  font: inherit;
+  text-align: right;
+  -moz-appearance: textfield;
+}
+.group-min-price-input::-webkit-outer-spin-button,
+.group-min-price-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
 /* Source badge in group header */
 .group-sources-badge {
   display: inline-flex;

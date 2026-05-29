@@ -88,6 +88,11 @@ def _create_schema(c):
         PRIMARY KEY (group_name, source)
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS group_settings (
+        group_name TEXT PRIMARY KEY,
+        min_price  REAL
+    )''')
+
     # Geocoding cache: maps a location string ("80331 München", "10115 Berlin")
     # to lat/lon. status='ok' = resolved, status='notfound' = Nominatim returned
     # nothing (negative cache, retry after a week).
@@ -372,6 +377,41 @@ def set_group_sources(group_name: str, sources: list[str]) -> None:
     conn.close()
 
 
+def get_group_min_price(group_name: str):
+    """Return the configured min_price for a group, or None if not set."""
+    conn = get_connection()
+    row = conn.execute(
+        'SELECT min_price FROM group_settings WHERE group_name = ?',
+        (group_name,),
+    ).fetchone()
+    conn.close()
+    return row['min_price'] if row else None
+
+
+def set_group_min_price(group_name: str, min_price) -> None:
+    """Set (or clear) the group-level min_price floor.
+    Pass None to remove the group's min_price restriction."""
+    conn = get_connection()
+    if min_price is None:
+        conn.execute('DELETE FROM group_settings WHERE group_name = ?', (group_name,))
+    else:
+        conn.execute(
+            'INSERT INTO group_settings (group_name, min_price) VALUES (?, ?)'
+            ' ON CONFLICT(group_name) DO UPDATE SET min_price = excluded.min_price',
+            (group_name, float(min_price)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_all_group_settings() -> dict:
+    """Return a dict of group_name -> { min_price } for all groups with settings."""
+    conn = get_connection()
+    rows = conn.execute('SELECT group_name, min_price FROM group_settings').fetchall()
+    conn.close()
+    return {r['group_name']: {'min_price': r['min_price']} for r in rows}
+
+
 def init_db():
     """Initialize the database: create schema, run migrations, clean data, seed defaults."""
     conn = get_connection()
@@ -650,7 +690,11 @@ _VISIBLE_SQL = (
     "    AND bs.seller = deals.seller"
     ") "
     "AND deals.price >= COALESCE("
-    "  (SELECT st.min_price FROM search_targets st WHERE st.name = deals.model), 100"
+    "  (SELECT st.min_price FROM search_targets st WHERE st.name = deals.model),"
+    "  (SELECT gs.min_price FROM group_settings gs"
+    "   JOIN search_targets st2 ON gs.group_name = st2.group_name"
+    "   WHERE st2.name = deals.model LIMIT 1),"
+    "  100"
     ")"
 )
 

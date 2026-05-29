@@ -655,8 +655,7 @@ def main():
             import urllib.request
             urllib.request.urlopen(f"{URL}/api/window/show", timeout=2).read()
         except Exception:
-            # Fallback: Default-Browser auf die URL
-            webbrowser.open(URL)
+            pass  # Fenster konnte nicht aktiviert werden — kein Browser-Fallback
         return
 
     check_updates_and_prompt()

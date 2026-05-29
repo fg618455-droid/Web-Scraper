@@ -326,6 +326,15 @@ function buildGroupedSections(targets) {
       ? `<span class="group-sources-badge" title="${sources.join(', ')}">${icon('link')} ${sources.length} Quelle${sources.length > 1 ? 'n' : ''}</span>`
       : `<span class="group-sources-badge group-sources-all" title="Alle verfügbaren Quellen">${icon('link')} alle Quellen</span>`;
 
+    const groupMinPrice = g.targets[0]?.group_min_price ?? null;
+    const minPriceInput = `<label class="group-min-price-wrap" title="Mindestpreis für die Gruppe – Deals darunter werden ausgeblendet" onclick="event.stopPropagation()">
+      <span class="group-min-price-pfx">ab €</span>
+      <input class="group-min-price-input" type="number" min="0" step="10"
+             value="${groupMinPrice ?? ''}" placeholder="–"
+             onblur="saveGroupMinPrice(${esc(JSON.stringify(g.name))}, this.value)"
+             onkeydown="if(event.key==='Enter'){this.blur()}" />
+    </label>`;
+
     return `
 <section class="group-block" data-group="${esc(g.name)}">
   <header class="group-head">
@@ -333,6 +342,7 @@ function buildGroupedSections(targets) {
     <span class="group-name">${esc(g.name)}</span>
     <span class="group-meta">${g.targets.length} ${g.targets.length === 1 ? 'Produkt' : 'Produkte'} · ${totalDeals} Deals</span>
     <span class="group-head-spacer"></span>
+    ${minPriceInput}
     ${sourceBadge}
     <button class="btn-icon group-scrape-btn" title="Alle Produkte dieser Gruppe scrapen"
             onclick="event.stopPropagation(); scrapeGroup(${esc(JSON.stringify(g.name))}, this)">
@@ -1120,6 +1130,21 @@ async function scrapeTarget(id, btn) {
     }
   }
 }
+
+async function saveGroupMinPrice(groupName, rawValue) {
+  const min_price = rawValue === '' ? null : parseFloat(rawValue);
+  try {
+    await api(`/api/groups/${encodeURIComponent(groupName)}/min-price`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ min_price }),
+    });
+    toast(`Mindestpreis für „${groupName}": ${min_price != null ? '€' + min_price : 'kein Limit'}`, 'success');
+  } catch (e) {
+    toast('Fehler beim Speichern des Mindestpreises', 'error');
+  }
+}
+
 
 async function scrapeGroup(groupName, btn) {
   if (btn?.disabled) return;

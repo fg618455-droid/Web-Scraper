@@ -165,9 +165,9 @@ def download_and_update(release_data, latest_version=None):
     html_url = release_data.get("html_url", "")
 
     if not getattr(sys, "frozen", False):
-        # Dev-Mode: kein In-Place-Update, nur Browser
+        # Dev-Mode: kein In-Place-Update
         if html_url:
-            webbrowser.open(html_url)
+            print(f"[Updater] Update verfuegbar: {html_url}")
         return True
 
     zip_url, zip_name = _find_zip_asset(release_data)

@@ -1306,6 +1306,20 @@ def api_get_sources():
     return jsonify(db.ALL_SOURCES)
 
 
+@app.route('/api/groups/<string:group_name>/min-price', methods=['GET'])
+def api_get_group_min_price(group_name: str):
+    return jsonify({'min_price': db.get_group_min_price(group_name)})
+
+
+@app.route('/api/groups/<string:group_name>/min-price', methods=['PUT'])
+def api_set_group_min_price(group_name: str):
+    data = request.get_json(force=True, silent=True) or {}
+    raw = data.get('min_price')
+    min_price = float(raw) if raw not in (None, '', 0) else None
+    db.set_group_min_price(group_name, min_price)
+    return jsonify({'ok': True, 'group': group_name, 'min_price': min_price})
+
+
 @app.route('/api/groups/<string:group_name>/sources', methods=['GET'])
 def api_get_group_sources(group_name: str):
     """Return the list of allowed sources for a group.
@@ -1329,11 +1343,9 @@ def api_set_group_sources(group_name: str):
 @app.route('/api/dashboard')
 def api_dashboard():
     targets = db.get_targets()
-    # Bulk-fetch sources per group ONCE so we don't call get_group_sources()
-    # per target (would be N+1 round-trips). Frontend reads sources off
-    # each target — without this field the group badge always shows
-    # "alle Quellen" no matter what the user saved.
+    # Bulk-fetch per-group data ONCE to avoid N+1 round-trips.
     group_sources_cache: dict[str, list[str]] = {}
+    group_settings_cache: dict = db.get_all_group_settings()
     result = []
     for t in targets:
         group = t.get('group_name')
@@ -1343,18 +1355,19 @@ def api_dashboard():
             except Exception:
                 group_sources_cache[group] = []
         result.append({
-            'id':           t['id'],
-            'name':         t['name'],
-            'keyword':      t['keyword'],
-            'active':       t['active'],
-            'group_name':   group,
-            'retail_price': t.get('retail_price'),
-            'min_price':    t.get('min_price'),
-            'wish_price':   t.get('wish_price'),
-            'apple_price':  t.get('apple_price'),
-            'sources':      group_sources_cache.get(group, []) if group else [],
-            'stats':        db.get_target_summary(t['name']),
-            'top_deals':    db.get_top_deals(t['name']) if t['active'] else [],
+            'id':             t['id'],
+            'name':           t['name'],
+            'keyword':        t['keyword'],
+            'active':         t['active'],
+            'group_name':     group,
+            'retail_price':   t.get('retail_price'),
+            'min_price':      t.get('min_price'),
+            'wish_price':     t.get('wish_price'),
+            'apple_price':    t.get('apple_price'),
+            'sources':        group_sources_cache.get(group, []) if group else [],
+            'group_min_price': group_settings_cache.get(group, {}).get('min_price') if group else None,
+            'stats':          db.get_target_summary(t['name']),
+            'top_deals':      db.get_top_deals(t['name']) if t['active'] else [],
         })
     return jsonify(result)
 
