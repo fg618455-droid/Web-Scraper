@@ -1422,6 +1422,24 @@ _PERSIST_LAST_USE = 0.0
 _PERSIST_DISABLED = False  # set to True after a hard failure to skip subsequent attempts for a while
 _PERSIST_DISABLED_UNTIL = 0.0
 
+# Iter. 37: Sites die wir ueber den persistent off-screen Chromium-Context
+# scrapen. Akamai/DataDome/PerimeterX erkennt headless=True zuverlaessig;
+# headed off-screen mit eigenem user-data-dir kommt durch. Ein Browser-Pool
+# spart 6+ Chromium-Startups pro Scrape — der bestehende _PERSIST_LOCK
+# serialisiert alles automatisch.
+_PERSIST_SITES = {
+    # Akamai-walled (in Iter. 36 reproduzierbar Status='blocked')
+    'eBay', 'Saturn', 'Idealo', 'Chrono24', 'Kaufland',
+    'Fossil', 'Skagen',
+    # Vermutlich bot-walled — wir geben ihnen via Persistent eine zweite Chance.
+    # Wenn sie eh ueber den batch-Pfad durchkommen (status='empty'), schadet
+    # Persistent nicht; die parser_fn ist dieselbe. Aber sobald Akamai/DD
+    # in Aktion tritt, sind sie hier abgesichert.
+    'Coolblue', 'Galaxus', 'Computeruniverse', 'Cyberport', 'Gravis',
+    'notebooksbilliger', 'Backmarket',
+    'Christ', 'Chronext', 'Valmano', 'Watchshop',
+}
+
 
 def _persistent_profile_path() -> str | None:
     """Pfad zum dedicated Chrome-Profile. None falls nicht initialisiert."""
@@ -1451,15 +1469,21 @@ def _persistent_available() -> bool:
 def _ensure_persistent_context():
     """Lazy-startet sync_playwright + launch_persistent_context, cached fuer
     die Lifetime des Prozesses. Caller muss _PERSIST_LOCK bereits halten.
+
+    Iter. 37: Wenn `with sync_playwright()` (Batch-Pfad) im selben Thread
+    geschlossen wurde, ist der greenlet-runner tot — _PERSIST_PW kann nicht
+    mehr genutzt werden ("cannot switch to a different thread"). Wir
+    detektieren das hier und starten frisch.
     """
     global _PERSIST_PW, _PERSIST_CTX
     if _PERSIST_CTX is not None:
-        # check ob noch alive
+        # check ob noch alive — fail-Pattern beim Greenlet-Tod ist eine
+        # ThreadException, nicht nur "context closed".
         try:
             _PERSIST_CTX.pages  # raises wenn closed
             return _PERSIST_CTX
-        except Exception:
-            logger.info('Persistent context died, restarting')
+        except Exception as e:
+            logger.info('Persistent context died (%s), restarting', e)
             _PERSIST_CTX = None
             try:
                 if _PERSIST_PW is not None:
@@ -1591,6 +1615,184 @@ def fetch_ebay_via_persistent(url: str, timeout_ms: int = 20_000) -> str | None:
             return None
         if len(html) < 5_000:
             logger.info('persistent fetch: HTML too short for %s (len=%d)', url, len(html))
+            return None
+        return html
+
+
+# ── Iter. 37: Generische Persistent-Context-Fetch fuer Such-Seiten ───────────
+# fetch_ebay_via_persistent ist eBay-spezifisch (40kB Schwelle, hartes
+# Akamai-Splash-Detect). Generelle Sites haben unterschiedliche Page-Sizes,
+# brauchen Cookie-Banner-Klicks und unterschiedliche Wait-Selektoren.
+# Diese Helper macht das fuer alle _PERSIST_SITES.
+
+_COOKIE_ACCEPT_SELECTORS = (
+    'button[id*="accept"]',
+    'button[id*="Accept"]',
+    'button[class*="accept"]',
+    'button[class*="consent"]',
+    '[data-testid="accept-cookies"]',
+    '[data-testid*="cookie"] button',
+    '#onetrust-accept-btn-handler',
+    '.cmpboxbtn.cmpboxbtnyes',
+    '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+    '[id*="sp-cc-accept"]',
+    '[id*="sp-cc-rejectall"]',
+    '#consent-page button[type="submit"]',  # eBay
+    'button:has-text("Alle akzeptieren")',
+    'button:has-text("Akzeptieren")',
+    'button:has-text("Zustimmen")',
+    'button:has-text("Annehmen")',
+    'button:has-text("Accept")',
+    'button:has-text("Alle Cookies akzeptieren")',
+)
+
+
+def fetch_search_via_persistent(
+    url: str,
+    *,
+    wait_selectors: str | None = None,
+    settle_ms: int = 2500,
+    timeout_ms: int = 25_000,
+    min_html_bytes: int = 5_000,
+) -> str | None:
+    """Generic search-page fetch via persistent off-screen Chromium.
+    Returns rendered HTML or None on bot-challenge / too-short / timeout.
+
+    Unlike fetch_ebay_via_persistent this:
+      - tries to dismiss a cookie banner (common across DE shops)
+      - does progressive scrolling to trigger lazy-loaded cards
+      - waits for the provided card selector (if given)
+      - auto-restart bei Greenlet-Tod (Iter. 37: passiert nach jedem
+        `with sync_playwright()` Block im selben Thread)
+    """
+    return _fetch_search_via_persistent_inner(
+        url, wait_selectors=wait_selectors, settle_ms=settle_ms,
+        timeout_ms=timeout_ms, min_html_bytes=min_html_bytes,
+        _retry_on_thread_death=True,
+    )
+
+
+def _fetch_search_via_persistent_inner(
+    url: str,
+    *,
+    wait_selectors: str | None,
+    settle_ms: int,
+    timeout_ms: int,
+    min_html_bytes: int,
+    _retry_on_thread_death: bool,
+) -> str | None:
+    global _PERSIST_LAST_USE, _PERSIST_DISABLED, _PERSIST_DISABLED_UNTIL, _PERSIST_PW, _PERSIST_CTX
+
+    if not _persistent_available():
+        return None
+
+    with _PERSIST_LOCK:
+        try:
+            ctx = _ensure_persistent_context()
+        except Exception as e:
+            msg = str(e).lower()
+            if _retry_on_thread_death and ('thread' in msg or 'greenlet' in msg):
+                logger.info('Persistent ensure_ctx raised thread-death (%s) — forced shutdown + restart', e)
+                _PERSIST_CTX = None
+                _PERSIST_PW = None
+                try:
+                    ctx = _ensure_persistent_context()
+                except Exception as e2:
+                    logger.warning('Persistent ensure_ctx retry failed: %s', e2)
+                    return None
+            else:
+                raise
+        if ctx is None:
+            _PERSIST_DISABLED = True
+            _PERSIST_DISABLED_UNTIL = time.time() + 120
+            return None
+
+        try:
+            from playwright.sync_api import TimeoutError as PWTimeout
+        except Exception:
+            PWTimeout = Exception   # type: ignore
+
+        html = ''
+        page = None
+        try:
+            page = ctx.new_page()
+            try:
+                page.goto(url, wait_until='domcontentloaded', timeout=timeout_ms)
+            except Exception as e:
+                logger.info('persistent search: goto failed %s: %s', url, e)
+                return None
+
+            # Cookie-Banner wegklicken (best-effort, scheitert leise)
+            try:
+                for sel in _COOKIE_ACCEPT_SELECTORS:
+                    try:
+                        btn = page.locator(sel).first
+                        if btn.is_visible(timeout=300):
+                            btn.click(timeout=1500)
+                            page.wait_for_timeout(400)
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            # Networkidle fuer dynamische SPA-Renders
+            try:
+                page.wait_for_load_state('networkidle', timeout=6_000)
+            except Exception:
+                pass
+
+            # Auf Card-Selektor warten falls angegeben — laenger als im Batch-
+            # Pfad weil Sites wie Idealo/Chronext SPA-Renders haben die >10s
+            # brauchen bis die ersten Search-Results gemounted sind.
+            if wait_selectors:
+                try:
+                    page.wait_for_selector(wait_selectors, timeout=15_000, state='attached')
+                except Exception:
+                    pass
+
+            # Lazy-Load triggern
+            try:
+                for pct in (0.3, 0.6, 0.9, 1.0):
+                    page.evaluate(f'window.scrollTo(0, document.body.scrollHeight * {pct})')
+                    page.wait_for_timeout(300 + random.randint(0, 200))
+            except Exception:
+                pass
+
+            # Zweiter Wait nach Scrolling — manche Sites laden mehr Cards via
+            # IntersectionObserver bei Scroll.
+            if wait_selectors:
+                try:
+                    page.wait_for_selector(wait_selectors, timeout=3_000, state='attached')
+                except Exception:
+                    pass
+
+            try:
+                page.wait_for_timeout(settle_ms)
+            except Exception:
+                pass
+
+            try:
+                html = page.content() or ''
+            except Exception as e:
+                logger.info('persistent search: content() failed %s: %s', url, e)
+                html = ''
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            _PERSIST_LAST_USE = time.time()
+
+        if not html:
+            return None
+        lo = html.lower()
+        if any(m in lo for m in _BOT_CHALLENGE_MARKERS):
+            logger.info('persistent search: bot-challenge for %s (len=%d)', url, len(html))
+            return None
+        if len(html) < min_html_bytes:
+            logger.info('persistent search: HTML too short %s (len=%d)', url, len(html))
             return None
         return html
 
@@ -2393,13 +2595,18 @@ _DEBUG_HTML_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debu
 
 def _save_debug_html(site_name: str, keyword: str, html: str):
     """Save page HTML for debugging when a parser returns 0 results.
-    Files are overwritten each run, so disk usage stays constant."""
+    Files are overwritten each run, so disk usage stays constant.
+
+    Iter. 37: cap auf 800 KB hochgesetzt — Persistent-Context-Sites wie
+    Cyberport/Idealo liefern 500-3500 KB HTML, mit 200 KB-Cap verloren wir
+    die meisten Produkt-Cards die am Seiten-Ende lazy-loaded werden.
+    """
     try:
         os.makedirs(_DEBUG_HTML_DIR, exist_ok=True)
         safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', f'{site_name}_{keyword}')
         path = os.path.join(_DEBUG_HTML_DIR, f'{safe_name}.html')
         with open(path, 'w', encoding='utf-8') as f:
-            f.write(html[:200_000])  # cap at 200 KB
+            f.write(html[:800_000])
         logger.info(f'Debug HTML saved: {path}')
     except Exception as e:
         logger.debug(f'Could not save debug HTML: {e}')
@@ -2869,6 +3076,45 @@ def scrape_alternate(targets):
 
 # ── Generic shop parser (works for many sites with similar structure) ────────
 
+_PRICE_TEXT_RE = re.compile(
+    r'(?:EUR|€|\$|CHF)\s*([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{1,2})?)'
+    r'|([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{1,2})?)\s*(?:EUR|€|\$|CHF|,-|,–|,\-)',
+    re.IGNORECASE,
+)
+
+
+def _extract_price_from_text(text: str) -> float | None:
+    """Iter. 37: Fallback-Price-Extraction aus reinem Text fuer Sites wie
+    Galaxus die hash-Klassen ohne 'price' im Namen nutzen, aber EUR/€-Marker
+    im Text haben."""
+    if not text:
+        return None
+    m = _PRICE_TEXT_RE.search(text)
+    if not m:
+        return None
+    raw = (m.group(1) or m.group(2) or '').strip()
+    if not raw:
+        return None
+    # German-format: 1.234,56 -> 1234.56
+    if ',' in raw and '.' in raw:
+        # 1.234,56 (thousands . + decimal ,)
+        raw = raw.replace('.', '').replace(',', '.')
+    elif ',' in raw:
+        # 849,99 or 849, (mit Dash) — wenn nach Komma 0-2 Ziffern -> decimal
+        parts = raw.split(',')
+        if len(parts[-1]) <= 2:
+            raw = parts[0].replace('.', '') + '.' + parts[-1].ljust(2, '0')
+        else:
+            raw = raw.replace(',', '').replace('.', '')
+    else:
+        raw = raw.replace('.', '')
+    try:
+        val = float(raw)
+        return val if val >= 1 else None
+    except ValueError:
+        return None
+
+
 def _make_generic_parser(website: str, item_selectors: list[str], base_url: str):
     """Build a parser function for a typical product-listing shop.
     Strategy: try CSS selectors first, fall back to JSON-LD structured data."""
@@ -2883,7 +3129,7 @@ def _make_generic_parser(website: str, item_selectors: list[str], base_url: str)
                 # data-cy faengt ReBuy ab.
                 title_el = item.select_one(
                     'h2, h3, h4, [class*="title"], [class*="name"], '
-                    '[class*="Title"], [class*="Name"], a[title], '
+                    '[class*="Title"], [class*="Name"], a[title], a[aria-label], '
                     '[data-testid*="title"], [data-testid*="name"], '
                     '[data-test*="title"], [data-test*="name"], '
                     '[data-cy*="title"], [data-cy*="name"], '
@@ -2893,7 +3139,8 @@ def _make_generic_parser(website: str, item_selectors: list[str], base_url: str)
                     '[class*="price"], [class*="Price"], .price, span.price, '
                     '[data-testid*="price"], [itemprop="price"], '
                     '[data-test*="price"], [data-cy*="price"], '
-                    '[class*="cost"], [class*="amount"]'
+                    '[class*="cost"], [class*="amount"], '
+                    '[class*="Cost"], [class*="Amount"]'
                 )
                 link_el  = item.select_one('a[href]')
                 img_el   = item.select_one('img')
@@ -2903,11 +3150,23 @@ def _make_generic_parser(website: str, item_selectors: list[str], base_url: str)
                     title_el = link_el
                 if not title_el or not link_el:
                     continue
-                title = (title_el.get('title') or title_el.get('aria-label')
+                title = (title_el.get('aria-label') or title_el.get('title')
                          or title_el.get_text(' ', strip=True)).strip()
                 if not title or len(title) < 5 or _is_unwanted(title, None, keyword):
                     continue
                 price = _parse_price(price_el.get_text(strip=True)) if price_el else None
+                # Iter. 37: Wenn kein price-class, suche EUR/€-Marker im Item-Text
+                item_text_full = item.get_text(' ', strip=True)
+                if price is None:
+                    price = _extract_price_from_text(item_text_full)
+                # Iter. 37: filtere Monatsraten — "12 EUR/Monat" ist nicht der Produktpreis
+                if price is not None and price < 200:
+                    lo = item_text_full.lower()
+                    if any(m in lo for m in (
+                        '/monat', 'pro monat', '€/mo', 'mtl.', 'monatsrate',
+                        'monatlich', '/mo.', '/month', 'per month',
+                    )):
+                        continue
                 if price is None or price < 100:
                     continue
                 href = _abs_url(link_el.get('href', ''), base_url)
@@ -3273,6 +3532,44 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
         'Uhrzeit.org': ['.proBox'],
         # ReBuy: Bootstrap-basiert, .ry-card.product Wrapper
         'ReBuy':       ['.ry-card.product', '[data-cy*="product-card"]'],
+        # ── Iter. 37 Phase 2: bot-walled Sites via Persistent-Context ───
+        # Galaxus: hash-Klassen aber stable <article>-Wrapper. Titel im
+        # aria-label des inneren <a>. Preis im hash-class span (EUR-Marker).
+        # Generic-Parser nimmt aria-label + _extract_price_from_text.
+        'Galaxus':     ['article'],
+        # Coolblue: Search-Cards haben oft data-product-uuid (wenn nicht 0 Ergebnisse)
+        'Coolblue':    ['[data-product-uuid]', 'article.product', '[class*="product-card"]'],
+        # Idealo: SPA, [data-testid="resultItem"] und Varianten
+        'Idealo':      ['[data-testid="resultItem"]', '[data-testid="product-card"]',
+                        'div[class*="resultItem"]', 'div[class*="ProductCard"]',
+                        '.offerList-item', 'article'],
+        # Christ: Shopware-aehnlich, .tile-Wrappers
+        'Christ':      ['.tile', 'article[class*="tile"]', '[class*="product-tile"]'],
+        # Watchshop: WatchShop UK Shopware. data-fp-tile oder .product
+        'Watchshop':   ['[data-fp-tile]', '[data-product]', '.product', 'article'],
+        # Chrono24: high-end watch articles
+        'Chrono24':    ['.article-item', '[data-article-id]', '[class*="article-info"]',
+                        '[class*="ResultListing"]'],
+        # Chronext: SPA, brauche grossen Karten-Wrapper
+        'Chronext':    ['[data-testid*="product"]', '[class*="ProductCard"]',
+                        'article', '[class*="item-tile"]'],
+        # Valmano: Shopware
+        'Valmano':     ['.product--box', '.product-tile', 'article.product'],
+        # Backmarket: React Cards
+        'Backmarket':  ['[data-test="product-card"]', 'article[data-product]',
+                        '[class*="ProductCard"]'],
+        # Cyberport / Gravis / notebooksbilliger: Shopware-Standard
+        'Cyberport':         ['article.product', '[class*="product-tile"]',
+                              '[class*="product-card"]', '[data-product]'],
+        'Gravis':            ['.product--box', '.product-box', 'article.product',
+                              '[class*="product-card"]'],
+        'notebooksbilliger': ['article.product', '.product-tile',
+                              '[class*="product-card"]', '[class*="produktbox"]'],
+        'Computeruniverse':  ['article.product', '[class*="product-card"]',
+                              '[class*="product-tile"]', '[data-product]'],
+        # Kaufland: React, data-testid="product-card"
+        'Kaufland':    ['[data-testid="product-card"]', 'article.product',
+                        '[class*="product-card"]'],
     }
 
     # (name, search_url_template, base_url, settle_ms)
@@ -3363,6 +3660,95 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
     ]
 
     all_deals: list[dict] = []
+
+    # Wiederverwendbarer eligibility-Check (sources-Filter pro Target/Gruppe).
+    def _eligible_for(name: str) -> list[dict]:
+        return [t for t in targets if not t.get('sources') or name in t['sources']]
+
+    # ── Iter. 37: Persistent-Sites zuerst (eigener sync_playwright-Context) ──
+    # WICHTIG: _ensure_persistent_context startet ein eigenes sync_playwright()
+    # via _PERSIST_PW. Wenn wir das innerhalb des OUTER `with sync_playwright()`
+    # Blocks aufrufen, kollidiert es ("Sync API inside the asyncio loop").
+    # Loesung: Persistent-Loop laeuft VOR dem Batch-Browser-Block. Der Persistent-
+    # Browser bleibt prozessweit gecached (Iter. 30 Singleton), kein Overhead.
+    persist_available_global = _persistent_available()
+    for name, url_builder, parser, settle_ms, wait_sel in configs:
+        if name not in _PERSIST_SITES:
+            continue
+        eligible_targets = _eligible_for(name)
+        if not eligible_targets:
+            _set_site_status(name, status='skipped',
+                             detail='Nicht in Gruppen-Quellen', count=0, ok=True)
+            continue
+        if not persist_available_global:
+            # Profile-Path fehlt o.ae. — Site bleibt blocked. Wird unten NICHT
+            # mehr vom batch-Browser nachgeholt (steht in _PERSIST_SITES).
+            _set_site_status(name, status='blocked',
+                             detail='Persistent-Context nicht verfuegbar',
+                             count=0, ok=False)
+            continue
+
+        site_deals_p: list[dict] = []
+        persist_ok = 0
+        persist_block = 0
+        persist_err: list[str] = []
+        for i, target in enumerate(eligible_targets):
+            if i > 0:
+                time.sleep(random.uniform(2.0, 5.0))
+            _set_current(site=name, target=target.get('name'),
+                         keyword=target.get('keyword'),
+                         group=target.get('group_name'))
+            url = url_builder(target['keyword'])
+            try:
+                html = fetch_search_via_persistent(
+                    url, wait_selectors=wait_sel, settle_ms=settle_ms)
+            except Exception as e:
+                persist_err.append(str(e)[:60])
+                logger.warning(f'{name} (persistent, {target["keyword"]}): {e}')
+                continue
+            if html is None:
+                persist_block += 1
+                logger.info(f'{name} (persistent, {target["keyword"]}): blocked/empty')
+                continue
+            persist_ok += 1
+            parsed = parser(html, target['name'], target.get('keyword'))
+            if not parsed:
+                _save_debug_html(name + '_persist', target['keyword'], html)
+                logger.info(f'{name} (persistent, {target["keyword"]}): parser 0 — debug HTML saved')
+            site_deals_p.extend(parsed)
+
+        if site_deals_p:
+            _set_site_status(name, status='ok', detail=None,
+                             count=len(site_deals_p), ok=True)
+        elif persist_ok > 0:
+            _set_site_status(name, status='empty',
+                             detail=f'persistent: {persist_ok}/{len(eligible_targets)} Seiten OK, Parser 0',
+                             count=0, ok=True)
+        elif persist_block:
+            _set_site_status(name, status='blocked',
+                             detail=f'persistent: {persist_block}/{len(eligible_targets)} Seiten geblockt',
+                             count=0, ok=False)
+        else:
+            _set_site_status(name, status='error',
+                             detail=persist_err[0] if persist_err else 'persistent unknown',
+                             count=0, ok=False)
+
+        all_deals.extend(site_deals_p)
+        logger.info(f'{name} (persistent): {len(site_deals_p)} deals '
+                    f'(ok={persist_ok}, blocked={persist_block}, err={len(persist_err)})')
+        time.sleep(random.uniform(1.0, 3.0))
+
+    # ── Iter. 37 Bug-Fix: Persistent-Greenlet VOR Batch-sync_playwright killen ──
+    # Wenn der Persist-Loop oben gelaufen ist, lebt `_PERSIST_PW` als sync_playwright-
+    # Greenlet im selben Thread. Ein zweites `with sync_playwright()` kollidiert
+    # damit und wirft "Sync API inside the asyncio loop". Wir killen das persist-
+    # Setup VOR dem Batch-Pfad — beim naechsten Group-Scrape wird sauber neu
+    # gestartet (5s extra-Overhead pro Group, akzeptabel).
+    try:
+        _shutdown_persistent_silent()
+    except Exception:
+        pass
+
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
@@ -3377,17 +3763,15 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
                 ],
             )
             for name, url_builder, parser, settle_ms, wait_sel in configs:
+                # Iter. 37: Persistent-Sites wurden bereits oben verarbeitet
+                if name in _PERSIST_SITES:
+                    continue
+
                 # Per-source target filtering: if a target's group has a
                 # non-empty sources list, only scrape sources that are in it.
-                # Empty sources list = no restriction = all sources allowed.
-                eligible_targets = [
-                    t for t in targets
-                    if not t.get('sources') or name in t['sources']
-                ]
+                eligible_targets = _eligible_for(name)
                 if not eligible_targets:
                     logger.debug(f'{name}: skipped — no active group allows this source')
-                    # Iter. 36: 'skipped' statt 'ok' damit die UI das deutlich
-                    # anders darstellt als "Seite OK, 0 Treffer" (= empty).
                     _set_site_status(name, status='skipped',
                                      detail='Nicht in Gruppen-Quellen', count=0, ok=True)
                     continue
@@ -3573,7 +3957,40 @@ def scrape_anti_bot_batch(targets: list[dict]) -> list[dict]:
             if STATUS['sites'].get(name, {}).get('status') is None:
                 _set_site_status(name, status='error', detail=str(e)[:100],
                                  count=0, ok=False)
+
+    # ── Iter. 37: Persistent-Context greenlet-recycle ────────────────
+    # `with sync_playwright()` Block oben hat den Thread-internen Greenlet-
+    # Runner zerstoert. Beim naechsten Group-Scrape wuerde `_PERSIST_CTX`
+    # zwar noch existieren, aber jede Methode wuerfe "cannot switch to a
+    # different thread (which happens to have exited)". Lazy-Restart funk-
+    # tioniert nicht, weil _PERSIST_CTX.pages selbst die Exception wirft
+    # — der Cleanup-Pfad triggert dann aber im Aufruf-Stack zu spaet.
+    # Loesung: persistent context proaktiv kill nach jedem Batch — beim
+    # naechsten fetch_search_via_persistent wird sauber neu gestartet.
+    try:
+        _shutdown_persistent_silent()
+    except Exception:
+        pass
+
     return all_deals
+
+
+def _shutdown_persistent_silent():
+    """Wie _shutdown_persistent aber ohne Lock-Aquire (kann waehrend Lock-
+    halter aufgerufen werden) und ohne logging-noise."""
+    global _PERSIST_PW, _PERSIST_CTX
+    try:
+        if _PERSIST_CTX is not None:
+            _PERSIST_CTX.close()
+    except Exception:
+        pass
+    _PERSIST_CTX = None
+    try:
+        if _PERSIST_PW is not None:
+            _PERSIST_PW.stop()
+    except Exception:
+        pass
+    _PERSIST_PW = None
 
 
 # ── Refurbished platforms ─────────────────────────────────────────────────────
