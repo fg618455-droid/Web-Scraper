@@ -570,18 +570,50 @@ function buildPanel(deals, stats) {
   if (!deals.length) {
     return `<div class="empty" style="padding:1.8rem">${icon('empty')}<div>Keine Angebote gefunden.</div></div>`;
   }
-  const top       = deals.slice(0, 6);
-  const cardsHtml = top.map(d => dealCard(d, stats)).join('');
-  const tableHtml = buildTable(deals);
   const count     = deals.length;
+  const tableHtml = buildTable(deals);
+
+  // Group by website/source
+  const byWebsite = {};
+  for (const d of deals) {
+    (byWebsite[d.website] = byWebsite[d.website] || []).push(d);
+  }
+  const websites = Object.keys(byWebsite).sort((a, b) => {
+    const aMin = Math.min(...byWebsite[a].map(d => d.price ?? Infinity));
+    const bMin = Math.min(...byWebsite[b].map(d => d.price ?? Infinity));
+    return aMin - bMin;
+  });
+
+  // Single source → flat card grid (no sub-group overhead)
+  if (websites.length <= 1) {
+    const top = deals.slice(0, 6);
+    return `
+<div class="panel-cards">${top.map(d => dealCard(d, stats)).join('')}</div>
+<div class="panel-expand">
+  <button class="expand-btn">${icon('chevron')}<span>Alle ${count} Angebote anzeigen</span></button>
+</div>
+<div class="panel-table">${tableHtml}</div>`;
+  }
+
+  // Multiple sources → sub-groups per website
+  const groupsHtml = websites.map(site => {
+    const sd   = byWebsite[site];
+    const sMin = Math.min(...sd.map(d => d.price ?? Infinity));
+    const top3 = sd.slice(0, 4);
+    return `<div class="src-group">
+  <div class="src-group-hd">
+    ${siteBadge(site)}
+    <span class="src-group-name">${esc(site)}</span>
+    <span class="src-group-meta">${sd.length} Deal${sd.length !== 1 ? 's' : ''} · ab ${fmt(sMin)}</span>
+  </div>
+  <div class="src-group-cards">${top3.map(d => dealCard(d, stats)).join('')}</div>
+</div>`;
+  }).join('');
 
   return `
-<div class="panel-cards">${cardsHtml}</div>
+<div class="src-groups">${groupsHtml}</div>
 <div class="panel-expand">
-  <button class="expand-btn">
-    ${icon('chevron')}
-    <span>Alle ${count} Angebote anzeigen</span>
-  </button>
+  <button class="expand-btn">${icon('chevron')}<span>Alle ${count} Angebote anzeigen</span></button>
 </div>
 <div class="panel-table">${tableHtml}</div>`;
 }

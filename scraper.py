@@ -1541,6 +1541,21 @@ def _ensure_persistent_context():
             return None
 
     logger.info('Persistent context started (profile=%s)', profile)
+
+    # Chrome restores the saved window position from the profile, ignoring
+    # --window-position. Force-minimize via CDP so the window stays hidden.
+    try:
+        _page = _PERSIST_CTX.pages[0] if _PERSIST_CTX.pages else _PERSIST_CTX.new_page()
+        _cdp = _PERSIST_CTX.new_cdp_session(_page)
+        _win = _cdp.send("Browser.getWindowForTarget")
+        _cdp.send("Browser.setWindowBounds", {
+            "windowId": _win["windowId"],
+            "bounds": {"windowState": "minimized"},
+        })
+        _cdp.detach()
+    except Exception as _e:
+        logger.debug("CDP window minimize failed: %s", _e)
+
     return _PERSIST_CTX
 
 
@@ -3167,7 +3182,7 @@ def _make_generic_parser(website: str, item_selectors: list[str], base_url: str)
                         'monatlich', '/mo.', '/month', 'per month',
                     )):
                         continue
-                if price is None or price < 100:
+                if price is None or price < 150:
                     continue
                 href = _abs_url(link_el.get('href', ''), base_url)
                 if not href:

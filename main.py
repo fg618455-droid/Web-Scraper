@@ -497,49 +497,6 @@ SPLASH_HTML = """<!doctype html>
 </body></html>"""
 
 
-class WindowAPI:
-    """Iter. 35 Stufe B: js_api fuer die Custom-HTML-Title-Bar.
-    Min/Max/Close-Buttons im HTML rufen ueber pywebview.api diese Methoden.
-    Pro Window eine Instanz mit dem Window-Key ('main' | 'scrape').
-    Close == hide() (gleicher Pfad wie closing-handler — App lebt im Tray).
-    """
-    def __init__(self, key: str):
-        self._key = key
-        self._maximized = False
-
-    def _win(self):
-        return _windows.get(self._key)
-
-    def minimize(self):
-        try:
-            w = self._win()
-            if w:
-                w.minimize()
-        except Exception as e:
-            print(f"[js_api] minimize({self._key}) failed: {e}")
-
-    def toggle_maximize(self):
-        try:
-            w = self._win()
-            if not w:
-                return
-            if self._maximized:
-                w.restore()
-                self._maximized = False
-            else:
-                w.maximize()
-                self._maximized = True
-        except Exception as e:
-            print(f"[js_api] toggle_maximize({self._key}) failed: {e}")
-
-    def close(self):
-        # Gleiche Logik wie X-Klick: hide statt destroy.
-        try:
-            w = self._win()
-            if w:
-                w.hide()
-        except Exception as e:
-            print(f"[js_api] close({self._key}) failed: {e}")
 
 
 def _make_closing_handler(window):
@@ -735,12 +692,6 @@ def main():
     global _ICON_PATH
     _ICON_PATH = icon_path if os.path.isfile(icon_path) else ""
 
-    # Iter. 35 Stufe B: frameless + js_api fuer Custom-HTML-Title-Bar.
-    # easy_drag=False weil wir nur die Title-Bar als Drag-Region wollen,
-    # nicht den ganzen Window-Body (sonst kollidieren Klicks im Content).
-    # Iter. 36 Stufe C: Window startet mit Splash-HTML, _switch_to_flask
-    # wechselt via load_url() zu Flask sobald /api/health antwortet —
-    # ersetzt das weisse Initial-Frame durch unseren Splash.
     main_win = webview.create_window(
         'Deal Tracker',
         html=SPLASH_HTML,
@@ -749,24 +700,16 @@ def main():
         min_size=(900, 600),
         background_color='#0b1220',
         text_select=True,
-        frameless=True,
-        easy_drag=False,
-        js_api=WindowAPI('main'),
     )
     scrape_win = webview.create_window(
         'Deal Tracker — Scrape',
         f'{URL}/scrape-window',
-        # Iter. 36: groesseres Fenster (vorher 380x540) damit mehr Sites
-        # gleichzeitig sichtbar sind. Bei 67 Sites war's vorher zu klein.
         width=560,
         height=760,
         min_size=(420, 540),
         background_color='#0b1220',
         hidden=True,
         on_top=True,
-        frameless=True,
-        easy_drag=False,
-        js_api=WindowAPI('scrape'),
     )
     _windows['main'] = main_win
     _windows['scrape'] = scrape_win
@@ -775,12 +718,23 @@ def main():
     main_win.events.closing += _make_closing_handler(main_win)
     scrape_win.events.closing += _make_closing_handler(scrape_win)
 
+    # DPI-Awareness: verhindert pixeligen/verschwommenen Text in WebView2.
+    # Muss vor webview.start() gesetzt werden.
+    try:
+        import ctypes
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)  # PER_MONITOR_AWARE_V2
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        except Exception:
+            pass
+
     try:
         webview.start(
-            _apply_dark_title_bars,  # Iter. 35 Stufe A: DWM-Dark-Title-Bar
+            _apply_dark_title_bars,
             icon=icon_path if os.path.isfile(icon_path) else None,
             debug=False,
-            private_mode=False,  # localStorage etc. persistieren
+            private_mode=False,
         )
     except Exception as e:
         print(f"[webview] start failed ({e}) — Chrome-Fallback.")

@@ -8,37 +8,11 @@
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
 
-<!-- Iter. 35 Stufe B: Custom Title-Bar (frameless window) -->
-<header class="app-titlebar" role="banner">
-  <div class="app-titlebar-drag pywebview-drag-region">
-    <div class="app-titlebar-brand">
-      <div class="app-titlebar-mark">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
-          <circle cx="7" cy="7" r="1.5" fill="currentColor"/>
-        </svg>
-      </div>
-      <span class="app-titlebar-title">Deal Tracker</span>
-    </div>
-  </div>
-  <div class="app-titlebar-controls">
-    <button type="button" class="app-titlebar-btn" data-titlebar-action="min" title="Minimieren" aria-label="Minimieren">
-      <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-    </button>
-    <button type="button" class="app-titlebar-btn app-titlebar-max" data-titlebar-action="max" title="Maximieren" aria-label="Maximieren">
-      <svg class="ico-max" viewBox="0 0 10 10" aria-hidden="true"><rect x="2" y="2" width="6" height="6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
-      <svg class="ico-restore" viewBox="0 0 10 10" aria-hidden="true"><rect x="2" y="3.2" width="4.8" height="4.8" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M3.2 3.2V2h4.8v4.8H6.8" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
-    </button>
-    <button type="button" class="app-titlebar-btn app-titlebar-close" data-titlebar-action="close" title="In Tray verstecken" aria-label="Schliessen">
-      <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-    </button>
-  </div>
-</header>
 
 <!-- Aurora background -->
 <div class="aurora" aria-hidden="true">
@@ -492,50 +466,5 @@
 
 <div id="toast-container"></div>
 <script src="/static/script.js"></script>
-<script>
-  // Iter. 35 Stufe B: Custom Title-Bar — Buttons an pywebview.api binden.
-  (function bindAppTitleBar() {
-    const maxBtn = document.querySelector('.app-titlebar-max');
-    function syncMaxIcon() {
-      if (!maxBtn) return;
-      // Heuristik: wenn das Fenster die volle verfuegbare Screen-Flaeche ausfuellt,
-      // gilt es als maximiert. screen.availHeight ist die Hoehe ohne Taskleiste.
-      const isMax = (window.outerWidth  >= screen.availWidth  - 2) &&
-                    (window.outerHeight >= screen.availHeight - 2);
-      maxBtn.classList.toggle('is-maximized', isMax);
-      maxBtn.title = isMax ? 'Wiederherstellen' : 'Maximieren';
-      maxBtn.setAttribute('aria-label', isMax ? 'Wiederherstellen' : 'Maximieren');
-    }
-    function dispatch(action) {
-      const api = window.pywebview && window.pywebview.api;
-      if (!api) return;
-      if (action === 'min')   api.minimize();
-      else if (action === 'max') {
-        api.toggle_maximize();
-        // pywebview setzt die Window-Geometrie asynchron — kurz warten
-        setTimeout(syncMaxIcon, 250);
-        setTimeout(syncMaxIcon, 750);
-      }
-      else if (action === 'close') api.close();
-    }
-    document.querySelectorAll('.app-titlebar-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        dispatch(btn.dataset.titlebarAction);
-      });
-    });
-    // Doppelklick auf Drag-Region = maximieren/wiederherstellen
-    const drag = document.querySelector('.app-titlebar-drag');
-    if (drag) {
-      drag.addEventListener('dblclick', (e) => {
-        e.preventDefault();
-        dispatch('max');
-      });
-    }
-    // Resize + initial: Icon-State synchron halten (z.B. wenn User per Aero-Snap maximiert)
-    window.addEventListener('resize', syncMaxIcon);
-    syncMaxIcon();
-  })();
-</script>
 </body>
 </html>
