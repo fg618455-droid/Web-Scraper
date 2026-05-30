@@ -266,6 +266,31 @@ def _find_browser():
     return None
 
 
+def _get_skipped_version() -> str:
+    """Liest die zuletzt uebersprungene Version aus config.json."""
+    try:
+        with open(_config_path, 'r', encoding='utf-8') as f:
+            return json.load(f).get('skipped_update_version', '')
+    except Exception:
+        return ''
+
+
+def _save_skipped_version(version: str):
+    """Speichert die uebersprungene Version in config.json."""
+    try:
+        cfg = {}
+        try:
+            with open(_config_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        except Exception:
+            pass
+        cfg['skipped_update_version'] = version
+        with open(_config_path, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def check_updates_and_prompt():
     if not getattr(__import__('sys'), 'frozen', False):
         return  # Dev-Mode: kein In-Place-Update moeglich, Dialog weglassen
@@ -276,6 +301,10 @@ def check_updates_and_prompt():
 
         latest_version, release_data = check_for_updates()
         if not (latest_version and release_data):
+            return
+
+        # Version wurde bereits uebersprungen?
+        if latest_version == _get_skipped_version():
             return
 
         current_version = get_current_version()
@@ -334,13 +363,24 @@ def check_updates_and_prompt():
         def on_later():
             root.destroy()
 
+        def on_skip():
+            _save_skipped_version(latest_version)
+            root.destroy()
+
         def on_update():
             _result['do_update'] = True
             update_btn.config(state='disabled')
             later_btn.config(state='disabled')
+            skip_btn.config(state='disabled')
             loading_var.set('⏳  Wird heruntergeladen und installiert …')
             root.update()
             root.destroy()
+
+        skip_btn = tk.Button(btn_frame, text='Überspringen', width=13,
+                             command=on_skip, relief='flat',
+                             bg='#f0f0f0', activebackground='#d8d8d8',
+                             fg='#666666', font=('Segoe UI', 9))
+        skip_btn.pack(side='left', padx=(0, 8))
 
         later_btn = tk.Button(btn_frame, text='Später', width=10,
                               command=on_later, relief='flat',

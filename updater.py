@@ -17,6 +17,7 @@ Fallback: Wenn der Download oder Extract scheitert, oeffnet sich
 die GitHub-Release-Seite im Browser wie vorher.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -115,6 +116,56 @@ def _find_zip_asset(release_data: dict) -> tuple:
     return None, None
 
 
+def _find_sha256_asset(release_data: dict, zip_name: str) -> str | None:
+    """Look for a .sha256 companion file matching the zip name."""
+    sha_name = (zip_name + ".sha256") if zip_name else None
+    for asset in release_data.get("assets", []) or []:
+        name = asset.get("name", "")
+        if sha_name and name == sha_name:
+            return asset.get("browser_download_url")
+        if name.lower().endswith(".sha256") and "windows" in name.lower():
+            return asset.get("browser_download_url")
+    return None
+
+
+def _verify_sha256(zip_path: str, sha_url: str) -> bool:
+    """Download checksum file and verify zip against it. Returns False on mismatch."""
+    try:
+        raw = _urlopen_retry(sha_url)
+        expected = raw.decode().split()[0].strip().lower()
+        h = hashlib.sha256()
+        with open(zip_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        actual = h.hexdigest().lower()
+        if actual == expected:
+            logger.info('SHA256 OK: %s', actual)
+            return True
+        logger.error('SHA256 MISMATCH: expected=%s  actual=%s', expected, actual)
+        return False
+    except Exception as exc:
+        logger.warning('SHA256 verification skipped: %s', exc)
+        return True  # treat missing checksum as non-fatal
+
+
+def _backup_deals_db() -> None:
+    """Copy deals.db to %APPDATA%\\DealScraper\\deals_backup_<timestamp>.db."""
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        return
+    db_src = os.path.join(appdata, "DealScraper", "deals.db")
+    if not os.path.exists(db_src):
+        logger.info('deals.db not found at %s — skipping backup', db_src)
+        return
+    try:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        dst = os.path.join(appdata, "DealScraper", f"deals_backup_{ts}.db")
+        shutil.copy2(db_src, dst)
+        logger.info('deals.db backed up to %s', dst)
+    except Exception as exc:
+        logger.warning('deals.db backup failed (non-fatal): %s', exc)
+
+
 def _download_with_progress(url: str, dest: str) -> None:
     """Download url to dest with retry on failure."""
     last_exc = None
@@ -166,9 +217,11 @@ def _restore_rollback(rollback_dir: str, install_dir: str) -> None:
         logger.error('Rollback FAILED: %s — manual reinstall may be needed', exc)
 
 
-def _write_helper(extract_root: str, install_dir: str, exe_name: str) -> str:
+def _write_helper(extract_root: str, install_dir: str, exe_name: str,
+                  tmp_root: str = "") -> str:
     helper_path = os.path.join(tempfile.gettempdir(), "dealscraper_update.bat")
     pid = os.getpid()
+    cleanup = f'rd /s /q "{tmp_root}"\r\n' if tmp_root else ""
     script = (
         "@echo off\r\n"
         "setlocal\r\n"
@@ -184,6 +237,7 @@ def _write_helper(extract_root: str, install_dir: str, exe_name: str) -> str:
         ")\r\n"
         "timeout /T 1 /NOBREAK >nul\r\n"
         'robocopy "%SRC%" "%DST%" /E /IS /R:3 /W:1 /NFL /NDL /NJH /NJS >nul\r\n'
+        + cleanup +
         'start "" "%DST%\\%EXE%"\r\n'
         '(goto) 2>nul & del "%~f0"\r\n'
     )
@@ -234,12 +288,20 @@ def download_and_update(release_data, latest_version=None):
         tmp_root  = tempfile.mkdtemp(prefix="dealscraper_update_")
         zip_path  = os.path.join(tmp_root, zip_name or "update.zip")
 
-        logger.info('Downloading %s …', zip_url)
+        logger.info('Downloading %s ...', zip_url)
         _download_with_progress(zip_url, zip_path)
+
+        # SHA256 verification
+        sha_url = _find_sha256_asset(release_data, zip_name)
+        if sha_url:
+            if not _verify_sha256(zip_path, sha_url):
+                raise ValueError("SHA256 checksum mismatch — aborting update")
+        else:
+            logger.warning('No .sha256 asset in release — skipping checksum verification')
 
         extract_dir = os.path.join(tmp_root, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
-        logger.info('Extracting zip …')
+        logger.info('Extracting zip ...')
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
 
@@ -248,7 +310,10 @@ def download_and_update(release_data, latest_version=None):
         # Backup current install before overwriting
         rollback_dir = _backup_install(install_dir, tmp_root)
 
-        helper = _write_helper(new_root, install_dir, exe_name)
+        # Backup deals.db before the helper overwrites files
+        _backup_deals_db()
+
+        helper = _write_helper(new_root, install_dir, exe_name, tmp_root)
         logger.info('Helper written: %s — spawning and exiting', helper)
 
         CREATE_NO_WINDOW = 0x08000000
@@ -262,11 +327,12 @@ def download_and_update(release_data, latest_version=None):
 
     except Exception as e:
         logger.error('In-place update failed: %s', e)
-        # Attempt rollback if we have a backup
         if tmp_root:
             rollback_candidate = os.path.join(tmp_root, 'rollback')
             if os.path.isdir(rollback_candidate):
                 _restore_rollback(rollback_candidate, install_dir)
+            shutil.rmtree(tmp_root, ignore_errors=True)
+            logger.info('Cleaned up temp dir after failed update: %s', tmp_root)
         if html_url:
             try:
                 webbrowser.open(html_url)
