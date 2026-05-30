@@ -483,6 +483,8 @@ def api_deals():
             'website':        request.args.get('website')  or None,
             'model':          request.args.get('model')    or None,
             'search':         request.args.get('search')   or None,
+            'color':          request.args.get('color')    or None,
+            'extra':          request.args.get('extra')    or None,
             'sort':           request.args.get('sort',  'found_at'),
             'order':          request.args.get('order', 'DESC'),
             'min_price': float(request.args['min_price']) if request.args.get('min_price') else None,

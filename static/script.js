@@ -13,11 +13,19 @@ let _groupsList = [];
 let _filterPlz    = '';
 let _filterRadius = 0;  // km, 0 = filter disabled
 let _filterSaveTimer = null;
+let _filterColor  = '';
+let _filterExtra  = '';
 
 function withFilterParams(url) {
-  if (!_filterPlz || _filterRadius <= 0) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return `${url}${sep}plz=${encodeURIComponent(_filterPlz)}&radius_km=${_filterRadius}`;
+  let result = url;
+  const sep = () => result.includes('?') ? '&' : '?';
+  if (_filterPlz && _filterRadius > 0)
+    result += `${sep()}plz=${encodeURIComponent(_filterPlz)}&radius_km=${_filterRadius}`;
+  if (_filterColor)
+    result += `${sep()}color=${encodeURIComponent(_filterColor)}`;
+  if (_filterExtra)
+    result += `${sep()}extra=${encodeURIComponent(_filterExtra)}`;
+  return result;
 }
 
 async function loadFilterSettings() {
@@ -62,6 +70,23 @@ async function saveFilterSettings() {
   } catch {
     toast('Filter konnte nicht gespeichert werden', 'error');
   }
+}
+
+function reloadOpenPanels() {
+  document.querySelectorAll('.cat-row').forEach(row => {
+    const inner = row.querySelector('.cat-panel-inner');
+    if (!inner) return;
+    delete inner.dataset.loaded;
+    if (row.classList.contains('open')) {
+      const model = row.dataset.model;
+      const stats = {
+        min_price:  parseFloat(row.dataset.min)  || null,
+        avg_price:  parseFloat(row.dataset.avg)  || null,
+        wish_price: parseFloat(row.dataset.wish) || null,
+      };
+      loadPanel(inner, model, stats);
+    }
+  });
 }
 
 /* ── eBay-Login-Session (Iter. 25) ─────────────────────────────────
@@ -2430,6 +2455,21 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('radius-slider')?.addEventListener('input', e => {
     _filterRadius = Number(e.target.value) || 0;
     scheduleFilterSave();
+  });
+
+  // Titel-Filter (color / extra)
+  let _titleFilterTimer = null;
+  function scheduleTitleFilter() {
+    if (_titleFilterTimer) clearTimeout(_titleFilterTimer);
+    _titleFilterTimer = setTimeout(reloadOpenPanels, 400);
+  }
+  document.getElementById('color-input')?.addEventListener('input', e => {
+    _filterColor = e.target.value.trim();
+    scheduleTitleFilter();
+  });
+  document.getElementById('extra-input')?.addEventListener('input', e => {
+    _filterExtra = e.target.value.trim();
+    scheduleTitleFilter();
   });
 
   // eBay-Login-Session (Iter. 25)

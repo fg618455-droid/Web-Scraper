@@ -7,7 +7,7 @@ echo.
 echo [1/3] Loesche kaputte PLAYWRIGHT_BROWSERS_PATH Umgebungsvariable...
 REG DELETE "HKCU\Environment" /v "PLAYWRIGHT_BROWSERS_PATH" /f 2>nul
 if errorlevel 1 (
-    echo       Variable war nicht gesetzt (oder schon weg) - OK.
+    echo       Variable war nicht gesetzt - OK.
 ) else (
     echo       Erfolgreich geloescht.
 )
@@ -25,5 +25,6 @@ if errorlevel 1 (
 
 echo.
 echo [3/3] Starte Deal Tracker...
+cd /d "%~dp0"
 python main.py
 

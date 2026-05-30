@@ -693,6 +693,12 @@ def get_all_deals(filters=None):
         if filters.get('search'):
             query += ' AND deals.title LIKE ?'
             params.append(f"%{filters['search']}%")
+        if filters.get('color'):
+            query += ' AND LOWER(deals.title) LIKE ?'
+            params.append(f"%{filters['color'].lower()}%")
+        if filters.get('extra'):
+            query += ' AND LOWER(deals.title) LIKE ?'
+            params.append(f"%{filters['extra'].lower()}%")
 
         sort_col   = filters.get('sort',  'found_at')
         sort_order = str(filters.get('order', 'DESC')).upper()
