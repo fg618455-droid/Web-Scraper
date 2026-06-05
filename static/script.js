@@ -33,7 +33,14 @@ async function loadFilterSettings() {
     const s = await api('/api/settings/filter');
     _filterPlz    = s.plz || '';
     _filterRadius = Number(s.radius_km) || 0;
+    _filterColor  = s.color || '';
+    _filterExtra  = s.extra || '';
     syncFilterUI();
+    // Restore color/extra inputs
+    const ci = document.getElementById('color-input');
+    const ei = document.getElementById('extra-input');
+    if (ci && _filterColor) ci.value = _filterColor;
+    if (ei && _filterExtra) ei.value = _filterExtra;
   } catch { /* silent — backend may be old */ }
 }
 
@@ -63,9 +70,11 @@ async function saveFilterSettings() {
     await api('/api/settings/filter', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plz: _filterPlz, radius_km: _filterRadius }),
+      body: JSON.stringify({
+        plz: _filterPlz, radius_km: _filterRadius,
+        color: _filterColor, extra: _filterExtra,
+      }),
     });
-    // Reload visible data so the filter immediately reflects.
     loadDashboard();
   } catch {
     toast('Filter konnte nicht gespeichert werden', 'error');
@@ -110,7 +119,10 @@ function renderEbaySessionStatus(s) {
   const loginBtn  = document.getElementById('ebay-login-btn');
   const logoutBtn = document.getElementById('ebay-logout-btn');
   const valBtn    = document.getElementById('ebay-validate-btn');
+  const badge     = document.getElementById('settings-badge');
   if (!statusEl || !loginBtn) return;
+  // Badge auf Settings-Button: sichtbar wenn Session abgelaufen oder nicht vorhanden
+  if (badge) badge.classList.toggle('hidden', !s.session_likely_expired);
 
   if (s.in_progress) {
     statusEl.textContent = '⏳ Browser-Fenster geöffnet — bitte einloggen…';
@@ -1454,6 +1466,8 @@ function openDrawer() {
   loadDrawerAlerts();
   loadDrawerPurchased();
   loadDrawerBlocked();
+  loadEbaySessionStatus();
+  loadBackupList();
 }
 function closeDrawer() {
   document.getElementById('drawer').classList.add('hidden');
@@ -2706,10 +2720,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('color-input')?.addEventListener('input', e => {
     _filterColor = e.target.value.trim();
     scheduleTitleFilter();
+    scheduleFilterSave();
   });
   document.getElementById('extra-input')?.addEventListener('input', e => {
     _filterExtra = e.target.value.trim();
     scheduleTitleFilter();
+    scheduleFilterSave();
   });
 
   // eBay-Login-Session

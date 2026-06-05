@@ -698,10 +698,12 @@ def api_deals():
 
 @app.route('/api/settings/filter', methods=['GET'])
 def api_get_filter_settings():
-    """Return persisted PLZ-Umkreis-Filter settings."""
+    """Return persisted filter settings (PLZ, radius, color, extra)."""
     return jsonify({
         'plz':       db.get_setting('filter_plz', '') or '',
         'radius_km': int(db.get_setting('filter_radius_km', '0') or 0),
+        'color':     db.get_setting('filter_color', '') or '',
+        'extra':     db.get_setting('filter_extra', '') or '',
     })
 
 
@@ -713,12 +715,16 @@ def api_save_filter_settings():
         radius_km = max(0, int(data.get('radius_km', 0)))
     except (ValueError, TypeError):
         radius_km = 0
+    color = str(data.get('color', '')).strip()[:80]
+    extra = str(data.get('extra', '')).strip()[:80]
     db.set_setting('filter_plz',       plz)
     db.set_setting('filter_radius_km', str(radius_km))
-    # Warm the geocode cache so the first filtered request is fast.
+    db.set_setting('filter_color',     color)
+    db.set_setting('filter_extra',     extra)
     if plz and radius_km > 0:
         geocode(plz)
-    return jsonify({'ok': True, 'plz': plz, 'radius_km': radius_km})
+    return jsonify({'ok': True, 'plz': plz, 'radius_km': radius_km,
+                    'color': color, 'extra': extra})
 
 
 @app.route('/api/scrape', methods=['POST'])
