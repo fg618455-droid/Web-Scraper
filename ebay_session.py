@@ -170,6 +170,63 @@ def _run_login_flow() -> None:
         )
 
 
+_SESSION_MAX_AGE_DAYS = 21
+
+
+def session_age_days() -> float | None:
+    """Wie alt ist die Session-Datei in Tagen? None wenn keine Session."""
+    if not has_session():
+        return None
+    try:
+        mtime = os.path.getmtime(SESSION_PATH)
+        return (time.time() - mtime) / 86400
+    except Exception:
+        return None
+
+
+def session_likely_expired() -> bool:
+    """True wenn die Session aelter als _SESSION_MAX_AGE_DAYS ist."""
+    age = session_age_days()
+    return age is not None and age > _SESSION_MAX_AGE_DAYS
+
+
+def validate_session() -> dict[str, Any]:
+    """Prueft ob die gespeicherte Session noch bei eBay gueltig ist.
+    Macht einen echten Browser-Request zu /mye/myebay/summary.
+    Gibt {'valid': bool, 'message': str} zurueck.
+    Blocking — in einem Thread aufrufen."""
+    if not has_session():
+        return {'valid': False, 'message': 'Keine Session gespeichert.'}
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return {'valid': False, 'message': 'Playwright nicht installiert.'}
+
+    try:
+        with sync_playwright() as pw:
+            ctx = pw.chromium.launch_persistent_context(
+                user_data_dir='',
+                headless=True,
+                storage_state=SESSION_PATH,
+            )
+            page = ctx.new_page()
+            page.goto(
+                'https://www.ebay.de/mye/myebay/summary',
+                wait_until='domcontentloaded',
+                timeout=15_000,
+            )
+            url = page.url.lower()
+            ctx.close()
+
+        if '/signin' in url or 'login' in url:
+            return {'valid': False, 'message': 'Session abgelaufen — bitte erneut einloggen.'}
+        return {'valid': True, 'message': 'Session gueltig.'}
+    except Exception as exc:
+        logger.warning('Session-Validierung fehlgeschlagen: %s', exc)
+        return {'valid': False, 'message': f'Validierung fehlgeschlagen: {exc}'}
+
+
 def start_login_flow_async() -> dict[str, Any]:
     """Spawn the login flow in a background thread and return immediately.
     Returns the dict that should be JSON-serialised back to the client."""

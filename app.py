@@ -731,7 +731,10 @@ def api_purchased():
 
 @app.route('/api/ebay-session/status')
 def api_ebay_session_status():
-    return jsonify(ebay_session.get_login_status())
+    status = ebay_session.get_login_status()
+    status['session_age_days'] = ebay_session.session_age_days()
+    status['session_likely_expired'] = ebay_session.session_likely_expired()
+    return jsonify(status)
 
 
 @app.route('/api/ebay-session/login', methods=['POST'])
@@ -740,6 +743,25 @@ def api_ebay_session_login():
     Returns immediately — flow runs in a background thread; UI polls
     /api/ebay-session/status until in_progress flips back to False."""
     return jsonify(ebay_session.start_login_flow_async())
+
+
+@app.route('/api/ebay-session/validate', methods=['POST'])
+def api_ebay_session_validate():
+    """Testet ob die gespeicherte eBay-Session noch gueltig ist.
+    Blocking — dauert ~5-15s. UI sollte Spinner zeigen."""
+    import threading
+    result = {'valid': False, 'message': 'Unbekannter Fehler'}
+    done = threading.Event()
+
+    def _run():
+        nonlocal result
+        result = ebay_session.validate_session()
+        done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    done.wait(timeout=30)
+    return jsonify({**result, 'session_age_days': ebay_session.session_age_days()})
 
 
 @app.route('/api/ebay-session/logout', methods=['POST'])
@@ -1252,6 +1274,36 @@ def api_top_deals():
     deals = db.get_top_deal_per_group()
     plz, radius_km = _read_plz_radius_args()
     return jsonify(_apply_plz_radius_filter(deals, plz, radius_km))
+
+
+@app.route('/api/cleanup-duplicates', methods=['POST'])
+def api_cleanup_duplicates():
+    """Findet und bereinigt Duplikate in der DB."""
+    try:
+        result = db.cleanup_duplicates()
+        logger.info('Duplicate cleanup: %d deals retired', result['retired'])
+        return jsonify({'ok': True, **result})
+    except Exception as e:
+        logger.exception('cleanup_duplicates error: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/backup', methods=['POST'])
+def api_backup():
+    """Erstellt ein timestamped Backup der deals.db."""
+    try:
+        path = db.backup_db()
+        backups = db.list_backups()
+        return jsonify({'ok': True, 'path': path, 'backups': backups})
+    except Exception as e:
+        logger.exception('Backup fehlgeschlagen: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/backup', methods=['GET'])
+def api_list_backups():
+    """Listet alle vorhandenen Backups."""
+    return jsonify(db.list_backups())
 
 
 @app.route('/api/export/csv')

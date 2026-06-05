@@ -337,6 +337,53 @@ def init_db():
 
 # ── Settings helpers ─────────────────────────────────────────────────────────
 
+def backup_db() -> str:
+    """Erstellt ein Zeitstempel-Backup von deals.db unter %APPDATA%\\DealScraper\\backups\\
+    und gibt den Pfad zurueck. Haelt maximal 10 Backups (aelteste werden geloescht)."""
+    import shutil
+    backup_dir = os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser("~")),
+        "DealScraper", "backups"
+    )
+    os.makedirs(backup_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = os.path.join(backup_dir, f"deals_{ts}.db")
+    shutil.copy2(DB_PATH, dest)
+    # Maximal 10 Backups behalten — aelteste loeschen
+    try:
+        existing = sorted(
+            (f for f in os.listdir(backup_dir) if f.startswith("deals_") and f.endswith(".db")),
+        )
+        for old in existing[:-10]:
+            try:
+                os.remove(os.path.join(backup_dir, old))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return dest
+
+
+def list_backups() -> list[dict]:
+    """Gibt alle vorhandenen Backups als Liste zurück."""
+    backup_dir = os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser("~")),
+        "DealScraper", "backups"
+    )
+    if not os.path.isdir(backup_dir):
+        return []
+    result = []
+    for fname in sorted(os.listdir(backup_dir), reverse=True):
+        if fname.startswith("deals_") and fname.endswith(".db"):
+            path = os.path.join(backup_dir, fname)
+            try:
+                size_kb = round(os.path.getsize(path) / 1024)
+            except Exception:
+                size_kb = 0
+            result.append({"filename": fname, "path": path, "size_kb": size_kb})
+    return result
+
+
 def get_setting(key: str, default: str | None = None) -> str | None:
     """Read a value from the settings table."""
     conn = get_connection()
@@ -1251,6 +1298,84 @@ def toggle_target(target_id: int):
     c.execute('UPDATE search_targets SET active = 1 - active WHERE id = ?', (target_id,))
     conn.commit()
     conn.close()
+
+
+def cleanup_duplicates() -> dict:
+    """Findet und bereinigt Duplikate in der deals-Tabelle.
+
+    Zwei Strategien:
+    1. eBay-Duplikate: gleiche eBay-Item-ID (10-15 stellige Zahl in der URL)
+       → behalte neueren/vollstaendigeren Deal, markiere den anderen als unavailable.
+    2. URL-Normalisierung: entferne Tracking-Params (?mkcid=..., ?hash=...) und
+       prüfe ob normalisierte URLs kollidieren — markiere den aelteren als unavailable.
+
+    Gibt die Anzahl bereinigter Zeilen zurueck.
+    """
+    import re as _re
+    conn = get_connection()
+    c = conn.cursor()
+
+    retired = 0
+
+    # Strategie 1: eBay-Duplikate via Item-ID
+    ebay_rows = c.execute(
+        "SELECT id, url, price, bid_count, last_seen FROM deals "
+        "WHERE website = 'eBay' AND available = 1 "
+        "ORDER BY last_seen DESC"
+    ).fetchall()
+
+    item_id_map: dict[str, list] = {}
+    _EBAY_ID_RE = _re.compile(r'(?:/itm/(?:[^/]+/)?|item=|ebay\.\w+/itm/)(\d{10,15})')
+    for row in ebay_rows:
+        m = _EBAY_ID_RE.search(row['url'])
+        if m:
+            eid = m.group(1)
+            item_id_map.setdefault(eid, []).append(row)
+
+    for eid, rows in item_id_map.items():
+        if len(rows) <= 1:
+            continue
+        # Behalte den mit mehr Daten (bid_count > 0 bevorzugt, dann neuester)
+        rows_sorted = sorted(
+            rows,
+            key=lambda r: (r['bid_count'] or 0, r['last_seen'] or ''),
+            reverse=True,
+        )
+        keep_id = rows_sorted[0]['id']
+        for r in rows_sorted[1:]:
+            c.execute('UPDATE deals SET available = 0 WHERE id = ?', (r['id'],))
+            retired += 1
+
+    # Strategie 2: URL-Normalisierung (Tracking-Params entfernen)
+    _TRACKING_RE = _re.compile(
+        r'[?&](?:mkcid|mkrid|campid|toolid|customid|hash|ref|epid|ssPageName'
+        r'|mkevt|mkcid|enc|sid)[^&]*'
+    )
+
+    def _normalize_url(url: str) -> str:
+        url = url.split('#')[0]
+        url = _TRACKING_RE.sub('', url)
+        url = url.rstrip('?&')
+        return url.lower()
+
+    all_rows = c.execute(
+        "SELECT id, url, found_at FROM deals WHERE available = 1 "
+        "ORDER BY found_at ASC"
+    ).fetchall()
+
+    seen_norm: dict[str, int] = {}
+    for row in all_rows:
+        norm = _normalize_url(row['url'])
+        if norm in seen_norm:
+            # Aeltere Zeile wird behalten (found_at ASC), neuere retired
+            c.execute('UPDATE deals SET available = 0 WHERE id = ?', (row['id'],))
+            retired += 1
+        else:
+            seen_norm[norm] = row['id']
+
+    conn.commit()
+    conn.close()
+    return {'retired': retired}
 
 
 def delete_target(target_id: int):

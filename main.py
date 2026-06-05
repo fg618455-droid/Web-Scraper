@@ -245,26 +245,70 @@ def _find_browser():
 def check_updates_and_prompt():
     try:
         import tkinter as tk
-        from tkinter import messagebox
-        from updater import check_for_updates, download_and_update
+        from tkinter import ttk, scrolledtext
+        from updater import check_for_updates, download_and_update, get_current_version
 
         latest_version, release_data = check_for_updates()
-        if latest_version and release_data:
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
+        if not latest_version or not release_data:
+            return
 
-            result = messagebox.askyesno(
-                "Update verfuegbar!",
-                "Eine neue Version (v{}) des Deal Scrapers ist verfuegbar."
-                "\n\nJetzt automatisch herunterladen und installieren?"
-                " Die App startet danach mit der neuen Version neu."
-                .format(latest_version)
-            )
+        current_version = get_current_version()
+        changelog = (release_data.get("body") or "").strip()
 
-            if result:
-                download_and_update(release_data, latest_version)
+        root = tk.Tk()
+        root.title("Deal Scraper Update")
+        root.configure(bg="#1a1a2e")
+        root.resizable(False, False)
+        root.attributes("-topmost", True)
+
+        # Fenster zentrieren
+        root.update_idletasks()
+        w, h = 480, 360 if changelog else 220
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+
+        result = {"install": False}
+
+        pad = {"padx": 20, "pady": 6}
+
+        tk.Label(root, text="Update verfügbar!", bg="#1a1a2e",
+                 fg="#4ecca3", font=("Segoe UI", 14, "bold")).pack(pady=(18, 4))
+        tk.Label(root, text=f"v{current_version}  →  v{latest_version}",
+                 bg="#1a1a2e", fg="#e0e0e0", font=("Segoe UI", 11)).pack()
+
+        if changelog:
+            tk.Label(root, text="Änderungen:", bg="#1a1a2e",
+                     fg="#a0a0b0", font=("Segoe UI", 9)).pack(anchor="w", **pad)
+            txt = scrolledtext.ScrolledText(root, height=9, width=52,
+                                            bg="#0f3460", fg="#e0e0e0",
+                                            font=("Consolas", 8), relief="flat",
+                                            state="normal")
+            txt.insert("end", changelog)
+            txt.configure(state="disabled")
+            txt.pack(padx=20, pady=(0, 8))
+
+        btn_frame = tk.Frame(root, bg="#1a1a2e")
+        btn_frame.pack(pady=12)
+
+        def _do_install():
+            result["install"] = True
             root.destroy()
+
+        def _skip():
+            root.destroy()
+
+        tk.Button(btn_frame, text="Jetzt installieren", command=_do_install,
+                  bg="#4ecca3", fg="#1a1a2e", font=("Segoe UI", 10, "bold"),
+                  relief="flat", padx=18, pady=7, cursor="hand2").pack(side="left", padx=8)
+        tk.Button(btn_frame, text="Überspringen", command=_skip,
+                  bg="#2a2a4a", fg="#a0a0b0", font=("Segoe UI", 10),
+                  relief="flat", padx=18, pady=7, cursor="hand2").pack(side="left", padx=8)
+
+        root.mainloop()
+
+        if result["install"]:
+            download_and_update(release_data, latest_version)
     except Exception:
         pass
 

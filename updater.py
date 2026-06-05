@@ -16,6 +16,7 @@ Fallback: Wenn der Download oder Extract scheitert, oeffnet sich
 die GitHub-Release-Seite im Browser wie vorher.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -92,6 +93,52 @@ def _download_with_progress(url: str, dest: str) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "DealScraper-Updater"})
     with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as out:
         shutil.copyfileobj(r, out, length=1024 * 256)
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 256), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _find_checksum_asset(release_data: dict) -> str | None:
+    """Sucht sha256sums.txt oder checksums.txt Asset im Release."""
+    for asset in release_data.get("assets", []) or []:
+        name = asset.get("name", "").lower()
+        if name in ("sha256sums.txt", "checksums.txt", "sha256.txt"):
+            return asset.get("browser_download_url")
+    return None
+
+
+def _verify_sha256(zip_path: str, zip_name: str, checksum_url: str) -> bool:
+    """Laedt sha256sums.txt, prueft Prüfsumme des ZIPs.
+    Gibt True zurueck wenn korrekt. Gibt True zurueck wenn kein Eintrag
+    fuer diese Datei gefunden (partial-checksums-Datei, kein Hard-Fail)."""
+    try:
+        req = urllib.request.Request(checksum_url,
+                                     headers={"User-Agent": "DealScraper-Updater"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            content = r.read().decode("utf-8", errors="replace")
+        target = zip_name.lower()
+        for line in content.splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            expected_hash, fname = parts[0], parts[-1].lstrip("*").lower()
+            if fname == target or target.endswith(fname):
+                actual = _sha256_file(zip_path)
+                if actual.lower() != expected_hash.lower():
+                    print(f"[Updater] SHA256-Fehler! Erwartet: {expected_hash}  Erhalten: {actual}")
+                    return False
+                print(f"[Updater] SHA256 OK: {actual[:16]}…")
+                return True
+        print(f"[Updater] Kein SHA256-Eintrag fuer {zip_name} gefunden — ueberspringe Pruefung.")
+        return True
+    except Exception as e:
+        print(f"[Updater] SHA256-Pruefung fehlgeschlagen: {e} — ueberspringe.")
+        return True
 
 
 def _extracted_root(extract_dir: str) -> str:
@@ -186,6 +233,17 @@ def download_and_update(release_data, latest_version=None):
         os.makedirs(extract_dir, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
+
+        # SHA256-Verifikation vor dem Entpacken
+        checksum_url = _find_checksum_asset(release_data)
+        if checksum_url:
+            if not _verify_sha256(zip_path, zip_name or "update.zip", checksum_url):
+                print("[Updater] SHA256-Prüfung fehlgeschlagen — Update abgebrochen.")
+                if html_url:
+                    webbrowser.open(html_url)
+                return False
+        else:
+            print("[Updater] Keine Checksums-Datei im Release — SHA256-Pruefung uebersprungen.")
 
         new_root = _extracted_root(extract_dir)
         install_dir = os.path.dirname(sys.executable)
