@@ -1,15 +1,16 @@
-"""Updater - prueft GitHub Releases, laedt das .zip und ersetzt
+"""Updater — prueft GitHub Releases, laedt das .zip und ersetzt
 die Installation in-place via Helfer-Batchskript.
 
 Iter. 28: Echter In-Place-Update statt nur Browser oeffnen.
+Iter. 40: Retry-Logik, Rollback, zentrales Logging, 30s Timeouts.
 
 Ablauf:
 1. check_for_updates() prueft die GitHub Releases API.
 2. download_and_update() laedt das .zip ins Temp, entpackt es,
-   und spawnt update_helper.bat. Die laufende .exe beendet sich
-   anschliessend; der Helper kopiert die neuen Dateien ueber die
-   alte Installation (deals.db / ebay_session.json bleiben in
-   %APPDATA%\\DealScraper, sie sind nicht im Install-Verzeichnis).
+   sichert (Rollback) die aktuelle Installation, und spawnt
+   update_helper.bat. Die laufende .exe beendet sich anschliessend;
+   der Helper kopiert die neuen Dateien ueber die alte Installation
+   (deals.db / ebay_session.json bleiben in %APPDATA%\\DealScraper).
 3. Der Helper startet die neue .exe und loescht sich selbst.
 
 Fallback: Wenn der Download oder Extract scheitert, oeffnet sich
@@ -18,22 +19,40 @@ die GitHub-Release-Seite im Browser wie vorher.
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import webbrowser
 import zipfile
 
-GITHUB_REPO = "fg618455-droid/Web-Scraper"
+# ── Logging setup ────────────────────────────────────────────────────────────
+# In frozen mode: log next to the .exe.  In dev: project dir.
+def _log_path() -> str:
+    if getattr(sys, 'frozen', False):
+        return os.path.join(os.path.dirname(sys.executable), 'updater.log')
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'updater.log')
+
+_handler = logging.FileHandler(_log_path(), encoding='utf-8')
+_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+logger = logging.getLogger('updater')
+logger.setLevel(logging.INFO)
+logger.addHandler(_handler)
+# Also echo to stdout so the console / app log picks it up
+logger.addHandler(logging.StreamHandler())
+
+GITHUB_REPO    = "fg618455-droid/Web-Scraper"
+REQUEST_TIMEOUT = 30    # seconds per HTTP request
+RETRY_COUNT     = 3     # attempts before giving up
+RETRY_WAIT      = 5     # seconds between retries
 
 
-def get_current_version():
+def get_current_version() -> str:
     try:
-        # version.json liegt neben main.py/database.py — im frozen Bundle
-        # extrahiert PyInstaller das nach sys._MEIPASS/version.json.
         if getattr(sys, "frozen", False):
             base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
         else:
@@ -45,43 +64,51 @@ def get_current_version():
         return "1.0.0"
 
 
-def _parse_version(v):
+def _parse_version(v: str) -> list[int]:
     return [int(x) for x in v.split(".") if x.isdigit()]
 
 
-def check_for_updates():
-    """Returnt (latest_version, release_info_dict) wenn ein neueres Release
-    existiert, sonst (None, None). release_info_dict hat html_url + assets
-    fuer den Download.
-    """
+def _urlopen_retry(url: str, **req_kwargs) -> bytes:
+    """GET url with retry logic. Raises on final failure."""
+    last_exc = None
+    for attempt in range(1, RETRY_COUNT + 1):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "DealScraper-Updater"}, **req_kwargs
+            )
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
+                return r.read()
+        except Exception as exc:
+            last_exc = exc
+            logger.warning('Attempt %d/%d failed for %s: %s', attempt, RETRY_COUNT, url, exc)
+            if attempt < RETRY_COUNT:
+                time.sleep(RETRY_WAIT)
+    raise last_exc
+
+
+def check_for_updates() -> tuple:
+    """Returns (latest_version, release_info_dict) if a newer release exists,
+    else (None, None)."""
     if not GITHUB_REPO or "DeinGitHubName" in GITHUB_REPO:
         return None, None
-
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "DealScraper-Updater"})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            if response.status != 200:
-                return None, None
-            data = json.loads(response.read().decode())
-
+        raw = _urlopen_retry(url)
+        data = json.loads(raw.decode())
         latest_version = data.get("tag_name", "").lstrip("v")
         if not latest_version:
             return None, None
-
         current = get_current_version()
         if _parse_version(latest_version) <= _parse_version(current):
             return None, None
-
+        logger.info('Update available: v%s (current: v%s)', latest_version, current)
         return latest_version, data
     except Exception as e:
-        print(f"Update Check Error: {e}")
+        logger.warning('Update check failed: %s', e)
         return None, None
 
 
-def _find_zip_asset(release_data):
-    """Sucht im Release-JSON den Windows-x64-.zip-Asset heraus."""
+def _find_zip_asset(release_data: dict) -> tuple:
     for asset in release_data.get("assets", []) or []:
         name = asset.get("name", "")
         if name.lower().endswith(".zip") and "windows" in name.lower():
@@ -89,10 +116,73 @@ def _find_zip_asset(release_data):
     return None, None
 
 
+def _find_sha256_asset(release_data: dict, zip_name: str) -> str | None:
+    """Look for a .sha256 companion file matching the zip name."""
+    sha_name = (zip_name + ".sha256") if zip_name else None
+    for asset in release_data.get("assets", []) or []:
+        name = asset.get("name", "")
+        if sha_name and name == sha_name:
+            return asset.get("browser_download_url")
+        if name.lower().endswith(".sha256") and "windows" in name.lower():
+            return asset.get("browser_download_url")
+    return None
+
+
+def _verify_sha256(zip_path: str, sha_url: str) -> bool:
+    """Download checksum file and verify zip against it. Returns False on mismatch."""
+    try:
+        raw = _urlopen_retry(sha_url)
+        expected = raw.decode().split()[0].strip().lower()
+        h = hashlib.sha256()
+        with open(zip_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        actual = h.hexdigest().lower()
+        if actual == expected:
+            logger.info('SHA256 OK: %s', actual)
+            return True
+        logger.error('SHA256 MISMATCH: expected=%s  actual=%s', expected, actual)
+        return False
+    except Exception as exc:
+        logger.warning('SHA256 verification skipped: %s', exc)
+        return True  # treat missing checksum as non-fatal
+
+
+def _backup_deals_db() -> None:
+    """Copy deals.db to %APPDATA%\\DealScraper\\deals_backup_<timestamp>.db."""
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        return
+    db_src = os.path.join(appdata, "DealScraper", "deals.db")
+    if not os.path.exists(db_src):
+        logger.info('deals.db not found at %s — skipping backup', db_src)
+        return
+    try:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        dst = os.path.join(appdata, "DealScraper", f"deals_backup_{ts}.db")
+        shutil.copy2(db_src, dst)
+        logger.info('deals.db backed up to %s', dst)
+    except Exception as exc:
+        logger.warning('deals.db backup failed (non-fatal): %s', exc)
+
+
 def _download_with_progress(url: str, dest: str) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "DealScraper-Updater"})
-    with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as out:
-        shutil.copyfileobj(r, out, length=1024 * 256)
+    """Download url to dest with retry on failure."""
+    last_exc = None
+    for attempt in range(1, RETRY_COUNT + 1):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "DealScraper-Updater"})
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r, \
+                 open(dest, "wb") as out:
+                shutil.copyfileobj(r, out, length=1024 * 256)
+            logger.info('Downloaded %s → %s', url, dest)
+            return
+        except Exception as exc:
+            last_exc = exc
+            logger.warning('Download attempt %d/%d failed: %s', attempt, RETRY_COUNT, exc)
+            if attempt < RETRY_COUNT:
+                time.sleep(RETRY_WAIT)
+    raise last_exc
 
 
 def _sha256_file(path: str) -> str:
@@ -142,12 +232,7 @@ def _verify_sha256(zip_path: str, zip_name: str, checksum_url: str) -> bool:
 
 
 def _extracted_root(extract_dir: str) -> str:
-    """PyInstaller-ZIPs haben den DealScraper-Ordner als einzigen Top-Level-
-    Eintrag. Wir geben den inneren Ordner zurueck, damit das Copy ohne
-    doppelte Verschachtelung passiert.
-    """
-    entries = [e for e in os.listdir(extract_dir)
-               if not e.startswith('.')]
+    entries = [e for e in os.listdir(extract_dir) if not e.startswith('.')]
     if len(entries) == 1:
         inner = os.path.join(extract_dir, entries[0])
         if os.path.isdir(inner):
@@ -155,19 +240,34 @@ def _extracted_root(extract_dir: str) -> str:
     return extract_dir
 
 
-def _write_helper(extract_root: str, install_dir: str, exe_name: str) -> str:
-    """Schreibt update_helper.bat ins Temp und gibt den Pfad zurueck.
+def _backup_install(install_dir: str, tmp_root: str) -> str:
+    """Copy the current installation to a rollback directory inside tmp_root.
+    Returns the rollback path so we can restore it on failure."""
+    rollback_dir = os.path.join(tmp_root, 'rollback')
+    os.makedirs(rollback_dir, exist_ok=True)
+    try:
+        shutil.copytree(install_dir, rollback_dir, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns('*.log', '__pycache__'))
+        logger.info('Rollback backup created at %s', rollback_dir)
+    except Exception as exc:
+        logger.warning('Rollback backup failed (non-fatal): %s', exc)
+    return rollback_dir
 
-    Der Helper: wartet bis die laufende .exe weg ist, kopiert mit robocopy
-    den neuen Stand drueber, startet die neue .exe, loescht sich selbst.
-    """
+
+def _restore_rollback(rollback_dir: str, install_dir: str) -> None:
+    """Copy rollback backup back over the installation directory."""
+    try:
+        shutil.copytree(rollback_dir, install_dir, dirs_exist_ok=True)
+        logger.info('Rollback restored from %s', rollback_dir)
+    except Exception as exc:
+        logger.error('Rollback FAILED: %s — manual reinstall may be needed', exc)
+
+
+def _write_helper(extract_root: str, install_dir: str, exe_name: str,
+                  tmp_root: str = "") -> str:
     helper_path = os.path.join(tempfile.gettempdir(), "dealscraper_update.bat")
     pid = os.getpid()
-    # robocopy:
-    #   /E   = alle Unterordner inkl. leerer
-    #   /IS  = "include same" ueberschreibt selbst bei gleichem Timestamp
-    #   /R:2 /W:1 = 2 Retries, 1s Wartezeit (Locked-File-Robustness)
-    #   /NFL /NDL /NJH /NJS = leise Logs
+    cleanup = f'rd /s /q "{tmp_root}"\r\n' if tmp_root else ""
     script = (
         "@echo off\r\n"
         "setlocal\r\n"
@@ -183,6 +283,7 @@ def _write_helper(extract_root: str, install_dir: str, exe_name: str) -> str:
         ")\r\n"
         "timeout /T 1 /NOBREAK >nul\r\n"
         'robocopy "%SRC%" "%DST%" /E /IS /R:3 /W:1 /NFL /NDL /NJH /NJS >nul\r\n'
+        + cleanup +
         'start "" "%DST%\\%EXE%"\r\n'
         '(goto) 2>nul & del "%~f0"\r\n'
     )
@@ -192,19 +293,20 @@ def _write_helper(extract_root: str, install_dir: str, exe_name: str) -> str:
 
 
 def download_and_update(release_data, latest_version=None):
-    """Fuehrt das echte In-Place-Update durch.
+    """Perform the in-place update.
 
-    release_data: das vollstaendige Release-JSON von check_for_updates.
-                  Backwards-Compat: wenn ein String uebergeben wird, oeffnen
-                  wir wie frueher nur die URL im Browser.
+    release_data: the full release JSON from check_for_updates.
+    Backwards-compat: if a string URL is passed, open it in the browser.
     """
-    # Backwards-Compat: alte Signatur (string-URL) -> Browser-Fallback
+    logger.info('download_and_update called (latest=%s)', latest_version)
+
     if isinstance(release_data, str):
         try:
             webbrowser.open(release_data)
-            return True
-        except Exception:
+        except Exception as exc:
+            logger.error('Browser fallback failed: %s', exc)
             return False
+        return True
 
     if not isinstance(release_data, dict):
         return False
@@ -212,25 +314,40 @@ def download_and_update(release_data, latest_version=None):
     html_url = release_data.get("html_url", "")
 
     if not getattr(sys, "frozen", False):
-        # Dev-Mode: kein In-Place-Update, nur Browser
+        logger.info('Dev-mode: skipping in-place update. Release: %s', html_url)
         if html_url:
-            webbrowser.open(html_url)
+            print(f"[Updater] Update verfuegbar: {html_url}")
         return True
 
     zip_url, zip_name = _find_zip_asset(release_data)
     if not zip_url:
+        logger.warning('No Windows .zip asset found in release')
         if html_url:
             webbrowser.open(html_url)
         return False
 
+    tmp_root = None
+    install_dir = os.path.dirname(sys.executable)
+    exe_name    = os.path.basename(sys.executable)
+
     try:
-        tmp_root = tempfile.mkdtemp(prefix="dealscraper_update_")
-        zip_path = os.path.join(tmp_root, zip_name or "update.zip")
-        print(f"[Updater] Lade {zip_url} ...")
+        tmp_root  = tempfile.mkdtemp(prefix="dealscraper_update_")
+        zip_path  = os.path.join(tmp_root, zip_name or "update.zip")
+
+        logger.info('Downloading %s ...', zip_url)
         _download_with_progress(zip_url, zip_path)
+
+        # SHA256 verification
+        sha_url = _find_sha256_asset(release_data, zip_name)
+        if sha_url:
+            if not _verify_sha256(zip_path, sha_url):
+                raise ValueError("SHA256 checksum mismatch — aborting update")
+        else:
+            logger.warning('No .sha256 asset in release — skipping checksum verification')
 
         extract_dir = os.path.join(tmp_root, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
+        logger.info('Extracting zip ...')
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
 
@@ -246,22 +363,33 @@ def download_and_update(release_data, latest_version=None):
             print("[Updater] Keine Checksums-Datei im Release — SHA256-Pruefung uebersprungen.")
 
         new_root = _extracted_root(extract_dir)
-        install_dir = os.path.dirname(sys.executable)
-        exe_name = os.path.basename(sys.executable)
 
-        helper = _write_helper(new_root, install_dir, exe_name)
-        print(f"[Updater] Helper geschrieben: {helper}")
+        # Backup current install before overwriting
+        rollback_dir = _backup_install(install_dir, tmp_root)
 
+        # Backup deals.db before the helper overwrites files
+        _backup_deals_db()
+
+        helper = _write_helper(new_root, install_dir, exe_name, tmp_root)
+        logger.info('Helper written: %s — spawning and exiting', helper)
+
+        CREATE_NO_WINDOW = 0x08000000
         subprocess.Popen(
-            ["cmd.exe", "/c", "start", "", "/MIN", helper],
+            ["cmd.exe", "/c", helper],
             close_fds=True,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "DETACHED_PROCESS", 0),
+                | CREATE_NO_WINDOW,
         )
-        # Aktuelle .exe-Process killen, Helper macht den Rest.
         os._exit(0)
+
     except Exception as e:
-        print(f"[Updater] In-Place-Update fehlgeschlagen: {e}")
+        logger.error('In-place update failed: %s', e)
+        if tmp_root:
+            rollback_candidate = os.path.join(tmp_root, 'rollback')
+            if os.path.isdir(rollback_candidate):
+                _restore_rollback(rollback_candidate, install_dir)
+            shutil.rmtree(tmp_root, ignore_errors=True)
+            logger.info('Cleaned up temp dir after failed update: %s', tmp_root)
         if html_url:
             try:
                 webbrowser.open(html_url)

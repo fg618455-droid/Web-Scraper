@@ -351,6 +351,15 @@ function buildGroupedSections(targets) {
       ? `<span class="group-sources-badge" title="${sources.join(', ')}">${icon('link')} ${sources.length} Quelle${sources.length > 1 ? 'n' : ''}</span>`
       : `<span class="group-sources-badge group-sources-all" title="Alle verfügbaren Quellen">${icon('link')} alle Quellen</span>`;
 
+    const groupMinPrice = g.targets[0]?.group_min_price ?? null;
+    const minPriceInput = `<label class="group-min-price-wrap" title="Mindestpreis für die Gruppe – Deals darunter werden ausgeblendet" onclick="event.stopPropagation()">
+      <span class="group-min-price-pfx">ab €</span>
+      <input class="group-min-price-input" type="number" min="0" step="10"
+             value="${groupMinPrice ?? ''}" placeholder="–"
+             onblur="saveGroupMinPrice(${esc(JSON.stringify(g.name))}, this.value)"
+             onkeydown="if(event.key==='Enter'){this.blur()}" />
+    </label>`;
+
     return `
 <section class="group-block" data-group="${esc(g.name)}">
   <header class="group-head">
@@ -358,6 +367,7 @@ function buildGroupedSections(targets) {
     <span class="group-name">${esc(g.name)}</span>
     <span class="group-meta">${g.targets.length} ${g.targets.length === 1 ? 'Produkt' : 'Produkte'} · ${totalDeals} Deals</span>
     <span class="group-head-spacer"></span>
+    ${minPriceInput}
     ${sourceBadge}
     <button class="btn-icon group-scrape-btn" title="Alle Produkte dieser Gruppe scrapen"
             onclick="event.stopPropagation(); scrapeGroup(${esc(JSON.stringify(g.name))}, this)">
@@ -595,18 +605,50 @@ function buildPanel(deals, stats) {
   if (!deals.length) {
     return `<div class="empty" style="padding:1.8rem">${icon('empty')}<div>Keine Angebote gefunden.</div></div>`;
   }
-  const top       = deals.slice(0, 6);
-  const cardsHtml = top.map(d => dealCard(d, stats)).join('');
-  const tableHtml = buildTable(deals);
   const count     = deals.length;
+  const tableHtml = buildTable(deals);
+
+  // Group by website/source
+  const byWebsite = {};
+  for (const d of deals) {
+    (byWebsite[d.website] = byWebsite[d.website] || []).push(d);
+  }
+  const websites = Object.keys(byWebsite).sort((a, b) => {
+    const aMin = Math.min(...byWebsite[a].map(d => d.price ?? Infinity));
+    const bMin = Math.min(...byWebsite[b].map(d => d.price ?? Infinity));
+    return aMin - bMin;
+  });
+
+  // Single source → flat card grid (no sub-group overhead)
+  if (websites.length <= 1) {
+    const top = deals.slice(0, 6);
+    return `
+<div class="panel-cards">${top.map(d => dealCard(d, stats)).join('')}</div>
+<div class="panel-expand">
+  <button class="expand-btn">${icon('chevron')}<span>Alle ${count} Angebote anzeigen</span></button>
+</div>
+<div class="panel-table">${tableHtml}</div>`;
+  }
+
+  // Multiple sources → sub-groups per website
+  const groupsHtml = websites.map(site => {
+    const sd   = byWebsite[site];
+    const sMin = Math.min(...sd.map(d => d.price ?? Infinity));
+    const top3 = sd.slice(0, 4);
+    return `<div class="src-group">
+  <div class="src-group-hd">
+    ${siteBadge(site)}
+    <span class="src-group-name">${esc(site)}</span>
+    <span class="src-group-meta">${sd.length} Deal${sd.length !== 1 ? 's' : ''} · ab ${fmt(sMin)}</span>
+  </div>
+  <div class="src-group-cards">${top3.map(d => dealCard(d, stats)).join('')}</div>
+</div>`;
+  }).join('');
 
   return `
-<div class="panel-cards">${cardsHtml}</div>
+<div class="src-groups">${groupsHtml}</div>
 <div class="panel-expand">
-  <button class="expand-btn">
-    ${icon('chevron')}
-    <span>Alle ${count} Angebote anzeigen</span>
-  </button>
+  <button class="expand-btn">${icon('chevron')}<span>Alle ${count} Angebote anzeigen</span></button>
 </div>
 <div class="panel-table">${tableHtml}</div>`;
 }
@@ -990,18 +1032,8 @@ async function loadDrawerTargets() {
           <input class="target-edit-input" data-field="group_name" value="${esc(t.group_name || '')}"
                  placeholder="Gruppe…" list="group-suggestions" />
           <div class="input-with-suffix">
-            <input class="target-edit-input" data-field="retail_price" type="number" min="0" step="1"
-                   value="${t.retail_price ?? ''}" placeholder="UVP" />
-            <span class="input-suffix">€</span>
-          </div>
-          <div class="input-with-suffix">
-            <input class="target-edit-input" data-field="min_price" type="number" min="0" step="1"
-                   value="${t.min_price ?? ''}" placeholder="Min" title="Mindestpreis – Angebote darunter gelten als Fake und werden ausgeblendet" />
-            <span class="input-suffix">€</span>
-          </div>
-          <div class="input-with-suffix">
             <input class="target-edit-input" data-field="wish_price" type="number" min="0" step="1"
-                   value="${t.wish_price ?? ''}" placeholder="Wunsch" title="Wunschpreis – Angebote darunter werden mit Gold-Rand markiert" />
+                   value="${t.wish_price ?? ''}" placeholder="Wunsch €" title="Wunschpreis – Angebote darunter werden mit Gold-Rand markiert" />
             <span class="input-suffix">€</span>
           </div>
         </div>
@@ -1015,11 +1047,7 @@ async function loadDrawerTargets() {
         const field  = e.target.dataset.field;
         const raw    = e.target.value.trim();
         let body;
-        if (field === 'retail_price') {
-          body = { retail_price: raw === '' ? null : parseFloat(raw) };
-        } else if (field === 'min_price') {
-          body = { min_price: raw === '' ? null : parseFloat(raw) };
-        } else if (field === 'wish_price') {
+        if (field === 'wish_price') {
           body = { wish_price: raw === '' ? null : parseFloat(raw) };
         } else {
           body = { group_name: raw || null };
@@ -1096,7 +1124,9 @@ async function scrapeTarget(id, btn) {
   if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
   try {
     const res = await api(`/api/scrape/${id}`, { method: 'POST' });
-    if (res.status === 'already_running') {
+    if (res.status === 'queued') {
+      toast(`„${res.target}" wartet (Position ${res.queue_position})…`, 'info');
+    } else if (res.status === 'already_running') {
       toast('Scraping läuft bereits…', 'warning');
     } else {
       toast(`„${res.target}" wird gescrapt…`, 'info');
@@ -1112,6 +1142,21 @@ async function scrapeTarget(id, btn) {
   }
 }
 
+async function saveGroupMinPrice(groupName, rawValue) {
+  const min_price = rawValue === '' ? null : parseFloat(rawValue);
+  try {
+    await api(`/api/groups/${encodeURIComponent(groupName)}/min-price`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ min_price }),
+    });
+    toast(`Mindestpreis für „${groupName}": ${min_price != null ? '€' + min_price : 'kein Limit'}`, 'success');
+  } catch (e) {
+    toast('Fehler beim Speichern des Mindestpreises', 'error');
+  }
+}
+
+
 async function scrapeGroup(groupName, btn) {
   if (btn?.disabled) return;
   if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
@@ -1120,12 +1165,18 @@ async function scrapeGroup(groupName, btn) {
       `/api/scrape/group/${encodeURIComponent(groupName)}`,
       { method: 'POST' },
     );
-    if (res.status === 'already_running') {
+    if (res.status === 'queued') {
+      const n = (res.targets || []).length;
+      toast(`Gruppe „${groupName}" wartet (${n} Produkt${n === 1 ? '' : 'e'}, Position ${res.queue_position})…`, 'info');
+    } else if (res.status === 'already_running') {
       toast('Scraping läuft bereits…', 'warning');
     } else {
       const n = (res.targets || []).length;
       toast(`Gruppe „${groupName}" wird gescrapt (${n} Produkt${n === 1 ? '' : 'e'})…`, 'info');
-      pollUntilDone();
+      // Iter. 35 fix: kein globales 19-Quellen-Overlay fuer Per-Gruppe-Scrape —
+      // das wirkte so als wuerde alles gescrapt, obwohl Backend nur die Gruppe
+      // scrapt. Spinner am Group-Button + Status-Pill geben weiter Feedback.
+      pollUntilDone({ noOverlay: true });
     }
   } catch (err) {
     toast('Fehler: ' + (err?.message ?? 'unbekannt'), 'error');
@@ -1149,12 +1200,15 @@ async function triggerScrape() {
   overlay.classList.remove('hidden', 'minimized');   // Iter. 26: bei Start volle Ansicht
   try {
     const res = await api('/api/scrape', { method: 'POST' });
-    if (res.status === 'already_running') {
+    if (res.status === 'queued') {
+      toast(`Globaler Scrape wartet (Position ${res.queue_position})…`, 'info');
+      overlay.classList.add('hidden');
+    } else if (res.status === 'already_running') {
       toast('Scraping läuft bereits…', 'warning');
     } else {
       toast('Scraping gestartet', 'info');
+      pollUntilDone();
     }
-    pollUntilDone();
   } catch (err) {
     toast('Fehler: ' + (err?.message ?? 'unbekannt'), 'error');
     overlay.classList.add('hidden');
@@ -1191,12 +1245,54 @@ const _PROG_LABEL = {
   error:   (info) => `Fehler${info.detail ? ' · ' + info.detail.replace(/^HTTP /, '') : ''}`,
 };
 
+function _ensureScrapePill(siteName) {
+  // Iter. 36: dynamisch fehlende Pills im Scrape-Overlay anlegen — sonst
+  // tauchen die 48 neuen Sites aus websitenliste.md gar nicht im Progress auf.
+  const list = document.getElementById('scrape-progress');
+  if (!list) return null;
+  let li = list.querySelector(`[data-site="${CSS.escape(siteName)}"]`);
+  if (li) return li;
+  li = document.createElement('li');
+  li.dataset.site = siteName;
+  const state = document.createElement('span'); state.className = 'prog-state';
+  const name  = document.createElement('span'); name.className  = 'prog-name'; name.textContent = siteName;
+  const count = document.createElement('span'); count.className = 'prog-count';
+  li.append(state, name, count);
+  list.appendChild(li);
+  return li;
+}
+
 function updateScrapeProgress(s) {
   if (!s.sites) return;
+
+  // Iter. 36: Live-Progress-Banner — zeigt aktuell laufende Site/Target/Gruppe.
+  const curBox = document.getElementById('scrape-current');
+  if (curBox) {
+    const c = s.current || {};
+    if (s.scraping && (c.site || c.target)) {
+      const kwEl    = document.getElementById('scrape-current-keyword');
+      const siteEl  = document.getElementById('scrape-current-site');
+      const grpEl   = document.getElementById('scrape-current-group');
+      if (kwEl)   kwEl.textContent   = c.keyword || c.target || '…';
+      if (siteEl) siteEl.textContent = c.site || '…';
+      if (grpEl)  grpEl.textContent  = c.group ? `· Gruppe „${c.group}"` : '';
+      curBox.classList.remove('hidden');
+    } else {
+      curBox.classList.add('hidden');
+    }
+  }
+
   for (const [site, info] of Object.entries(s.sites)) {
-    const li = document.querySelector(`#scrape-progress [data-site="${site}"]`);
+    // Iter. 36: Sites die in keiner Gruppen-Quellen-Liste sind oder
+    // explizit als 'skipped' markiert wurden - aus der Pillen-Liste raus.
+    if (info.eligible === false || info.status === 'skipped') {
+      const existing = document.querySelector(`#scrape-progress [data-site="${CSS.escape(site)}"]`);
+      if (existing) existing.classList.add('prog-skipped');
+      continue;
+    }
+    const li = _ensureScrapePill(site);
     if (!li) continue;
-    li.classList.remove('prog-done', 'prog-err', 'prog-empty', 'prog-blocked');
+    li.classList.remove('prog-done', 'prog-err', 'prog-empty', 'prog-blocked', 'prog-skipped');
     const cnt = li.querySelector('.prog-count');
     if (info.status === 'ok') {
       li.classList.add('prog-done');
@@ -2366,11 +2462,61 @@ function _initBookmarkletUI() {
   }
 }
 
+/* ── Update-Banner ──────────────────────────────────────────────────── */
+async function checkForUpdate() {
+  try {
+    const data = await api('/api/update/check');
+    if (!data.update_available) return;
+    const banner   = document.getElementById('update-banner');
+    const textEl   = document.getElementById('update-banner-text');
+    const pre      = document.getElementById('update-changelog-pre');
+    const details  = document.getElementById('update-changelog-details');
+    const spinner  = document.getElementById('update-now-spinner');
+    const nowBtn   = document.getElementById('update-now-btn');
+    const laterBtn = document.getElementById('update-later-btn');
+
+    textEl.textContent =
+      `v${data.current_version} → v${data.latest_version} verfügbar`;
+    if (data.changelog) {
+      pre.textContent = data.changelog;
+    } else {
+      details.style.display = 'none';
+    }
+    banner.classList.remove('hidden');
+
+    laterBtn.addEventListener('click', () => banner.classList.add('hidden'));
+
+    nowBtn.addEventListener('click', async () => {
+      nowBtn.disabled = true;
+      laterBtn.disabled = true;
+      spinner.classList.remove('hidden');
+      nowBtn.querySelector('span + .btn-label') &&
+        (nowBtn.lastChild.textContent = 'Installiere…');
+      try {
+        const res = await api('/api/update/install', { method: 'POST' });
+        if (res.ok) {
+          toast('Update gestartet — App startet gleich neu…', 'success');
+        } else {
+          toast(res.error || 'Update fehlgeschlagen', 'error');
+          nowBtn.disabled = false; laterBtn.disabled = false;
+          spinner.classList.add('hidden');
+        }
+      } catch {
+        toast('Update-Anfrage fehlgeschlagen', 'error');
+        nowBtn.disabled = false; laterBtn.disabled = false;
+        spinner.classList.add('hidden');
+      }
+    });
+  } catch { /* silent — update check is best-effort */ }
+}
+
 /* ═══ INIT ══════════════════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
   loadDashboard();
   updateStatus();
   setInterval(updateStatus, 15_000);
+  // Check for updates once on load (best-effort, only shows banner if update available)
+  setTimeout(checkForUpdate, 3_000);
 
   // Search
   const searchInput = document.getElementById('search-input');
@@ -2380,6 +2526,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('add-target-btn').addEventListener('click', openAddModal);
   document.getElementById('scrape-btn').addEventListener('click', triggerScrape);
   document.getElementById('interval-input').addEventListener('change', saveInterval);
+
+  // Iter. 36: Klick auf Status-Pille oeffnet das Scrape-Status-Fenster
+  document.getElementById('status-pill')?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/scrape-window/show', { method: 'POST' });
+    } catch (e) { /* silent */ }
+  });
 
   // Iter. 26: Scrape-Overlay minimieren — Felix wollte waehrend des Scrapings
   // weiter mit der App arbeiten. Toggle via Header-Button, Click auf Backdrop
@@ -2476,6 +2629,18 @@ document.addEventListener('DOMContentLoaded', () => {
   loadEbaySessionStatus();
   document.getElementById('ebay-login-btn')?.addEventListener('click', startEbayLogin);
   document.getElementById('ebay-logout-btn')?.addEventListener('click', logoutEbay);
+
+  // Deal-Links in Chrome --app oeffnen statt Standard-Browser (Opera)
+  document.addEventListener('click', e => {
+    const a = e.target.closest('a[target="_blank"]');
+    if (!a || !a.href) return;
+    e.preventDefault();
+    fetch('/api/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: a.href }),
+    });
+  }, true);
 
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {

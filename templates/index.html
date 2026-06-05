@@ -3,14 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b1220" />
   <title>Deal Tracker</title>
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+
 
 <!-- Aurora background -->
 <div class="aurora" aria-hidden="true">
@@ -182,15 +184,34 @@
         <option value="1440">24 h</option>
       </select>
     </div>
-    <div class="status-pill" title="Status">
+    <button type="button" class="status-pill status-pill-btn" id="status-pill"
+            title="Scrape-Fenster öffnen">
       <span class="dot" id="status-dot"></span>
       <span id="status-text" class="dim">–</span>
-    </div>
+    </button>
     <button class="btn-icon" id="settings-btn" title="Einstellungen">
       <svg><use href="#i-settings"/></svg>
     </button>
   </div>
 </header>
+
+<!-- Update-Banner (hidden until /api/update/check finds a newer version) -->
+<div id="update-banner" class="update-banner hidden" role="alert">
+  <div class="update-banner-body">
+    <span class="update-badge">🆕 Update</span>
+    <span id="update-banner-text">Neue Version verfügbar</span>
+    <details id="update-changelog-details" class="update-changelog-details">
+      <summary>Changelog anzeigen</summary>
+      <pre id="update-changelog-pre" class="update-changelog-pre"></pre>
+    </details>
+  </div>
+  <div class="update-banner-actions">
+    <button id="update-later-btn" class="btn btn-secondary btn-sm">Später</button>
+    <button id="update-now-btn" class="btn btn-primary btn-sm">
+      <span id="update-now-spinner" class="hidden">⏳ </span>Jetzt updaten
+    </button>
+  </div>
+</div>
 
 <main id="dashboard">
   <div class="loading-skel">
@@ -360,6 +381,14 @@
     </div>
     <div class="overlay-title">Scraping läuft…</div>
     <div class="overlay-sub">Suche nach neuen Deals auf allen Quellen <span class="overlay-hint">— Klick neben das Fenster zum Minimieren</span></div>
+    <!-- Iter. 36: Live-Progress-Banner zeigt was gerade läuft -->
+    <div id="scrape-current" class="overlay-current hidden">
+      <span class="overlay-current-icon"><svg><use href="#i-refresh"/></svg></span>
+      <span class="overlay-current-text">
+        Suche <b id="scrape-current-keyword">…</b> auf <b id="scrape-current-site">…</b>
+        <span class="overlay-current-group" id="scrape-current-group"></span>
+      </span>
+    </div>
     <ul id="scrape-progress" class="scrape-progress">
       <li data-site="Kleinanzeigen"><span class="prog-state"></span><span class="prog-name">Kleinanzeigen</span><span class="prog-count"></span></li>
       <li data-site="eBay"><span class="prog-state"></span><span class="prog-name">eBay</span><span class="prog-count"></span></li>

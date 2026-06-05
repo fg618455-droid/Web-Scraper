@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b1220" />
+  <title>Deal Scraper · Status</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: radial-gradient(ellipse at top, #1e293b 0%, #0b1220 60%, #050810 100%);
+      color: #e2e8f0;
+      padding: 14px 18px 14px;
+      display: flex; flex-direction: column;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    h1 { margin: 0; font-size: 13px; font-weight: 700; text-transform: uppercase;
+         letter-spacing: 1.4px; color: #94a3b8; }
+    .header {
+      display: flex; align-items: center; gap: 10px;
+      padding-bottom: 14px; border-bottom: 1px solid rgba(148,163,184,0.12);
+    }
+    .header .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #475569; transition: background 0.3s, box-shadow 0.3s;
+    }
+    .dot.scraping { background: #3b82f6; box-shadow: 0 0 12px #3b82f6; animation: pulse 1.4s infinite; }
+    .dot.idle     { background: #22c55e; }
+    .dot.error    { background: #ef4444; }
+    @keyframes pulse {
+      0%,100% { opacity: 1; transform: scale(1); }
+      50%     { opacity: 0.55; transform: scale(0.85); }
+    }
+    .status-block {
+      padding: 22px 0 18px;
+      text-align: center;
+    }
+    .status-state {
+      font-size: 26px; font-weight: 800; letter-spacing: -0.6px;
+      color: #f1f5f9;
+    }
+    .status-substate {
+      margin-top: 6px;
+      font-size: 12px; font-weight: 500; color: #94a3b8;
+    }
+    .meta-row {
+      display: flex; justify-content: space-between;
+      font-size: 11px; color: #64748b; letter-spacing: 0.4px;
+      text-transform: uppercase; font-weight: 600;
+      padding: 10px 0;
+      border-top: 1px solid rgba(148,163,184,0.10);
+      border-bottom: 1px solid rgba(148,163,184,0.10);
+    }
+    .meta-row span:last-child { color: #cbd5e1; text-transform: none; font-weight: 500; }
+
+    .sites-title {
+      margin: 14px 0 8px;
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 1.2px; color: #64748b;
+    }
+    /* Iter. 36: Live-Progress-Banner — was wird gerade gescrapt */
+    .live-banner {
+      display: none;
+      align-items: center; gap: 8px;
+      margin: 10px 0 4px;
+      padding: 8px 12px;
+      background: linear-gradient(135deg, rgba(99,102,241,0.18), rgba(139,92,246,0.18));
+      border: 1px solid rgba(139,92,246,0.4);
+      border-radius: 9px;
+      font-size: 11.5px; line-height: 1.35;
+      color: #e2e8f0;
+    }
+    .live-banner.on { display: flex; }
+    .live-banner-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #8b5cf6;
+      box-shadow: 0 0 8px #8b5cf6;
+      animation: pulse 1.2s infinite;
+      flex-shrink: 0;
+    }
+    .live-banner b { font-weight: 700; color: #f1f5f9; }
+    .live-banner .grp { color: #94a3b8; font-size: 10.5px; margin-left: 4px; }
+    .sites {
+      flex: 1 1 auto; overflow-y: auto;
+      display: grid;
+      /* Iter. 36: auto-fill macht 2 oder 3 Spalten je nach Window-Breite */
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 6px;
+      padding-right: 4px;
+    }
+    .sites::-webkit-scrollbar { width: 6px; }
+    .sites::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.25); border-radius: 3px; }
+    .site {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 10px; border-radius: 8px;
+      background: rgba(30,41,59,0.55);
+      font-size: 11px; color: #cbd5e1;
+      overflow: hidden;
+    }
+    .site .pill {
+      flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%;
+      background: #475569;
+    }
+    .site.ok  .pill { background: #22c55e; }
+    .site.err .pill { background: #ef4444; }
+    .site .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .site .count { color: #94a3b8; font-variant-numeric: tabular-nums; font-size: 10px; }
+
+    .actions {
+      margin-top: 14px;
+      display: flex; gap: 8px;
+    }
+    button {
+      flex: 1; padding: 10px 14px; border-radius: 10px;
+      border: 1px solid rgba(148,163,184,0.18);
+      background: rgba(30,41,59,0.55);
+      color: #e2e8f0; font: inherit; font-weight: 600; font-size: 12px;
+      cursor: pointer; transition: background 0.15s, border-color 0.15s;
+    }
+    button:hover  { background: rgba(51,65,85,0.85); border-color: rgba(148,163,184,0.32); }
+    button.primary {
+      background: linear-gradient(180deg, #3b82f6, #2563eb);
+      border-color: #1d4ed8; color: white;
+    }
+    button.primary:hover  { background: linear-gradient(180deg, #60a5fa, #3b82f6); }
+    button:disabled       { opacity: 0.55; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+
+<div class="header">
+  <div class="dot" id="dot"></div>
+  <h1>Deal Scraper</h1>
+</div>
+
+<div class="status-block">
+  <div class="status-state" id="state">…</div>
+  <div class="status-substate" id="substate">&nbsp;</div>
+</div>
+
+<div class="meta-row">
+  <span>Letzter Scrape</span><span id="last">—</span>
+</div>
+<div class="meta-row" style="border-top:0">
+  <span>Intervall</span><span id="interval">—</span>
+</div>
+
+<!-- Iter. 36: Live-Progress-Banner -->
+<div class="live-banner" id="live-banner">
+  <span class="live-banner-dot"></span>
+  <span>
+    Suche <b id="live-kw">…</b> auf <b id="live-site">…</b>
+    <span class="grp" id="live-grp"></span>
+  </span>
+</div>
+
+<div class="sites-title">Quellen</div>
+<div class="sites" id="sites"></div>
+
+<div class="actions">
+  <button type="button" id="btn-scrape" class="primary">Jetzt scrapen</button>
+  <button type="button" id="btn-open">Hauptfenster</button>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let scrapingSince = null;
+
+function fmtAgo(iso) {
+  if (!iso) return 'noch nie';
+  const sec = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (sec < 60) return `vor ${Math.round(sec)}s`;
+  if (sec < 3600) return `vor ${Math.round(sec/60)}m`;
+  if (sec < 86400) return `vor ${Math.round(sec/3600)}h`;
+  return `vor ${Math.round(sec/86400)}d`;
+}
+function fmtDur(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s/60)}m ${s%60}s`;
+}
+
+function renderSites(sites) {
+  const order = Object.keys(sites || {});
+  const root = $('sites');
+  root.replaceChildren();
+  for (const name of order) {
+    const s = sites[name] || {};
+    // Iter. 36: Sites die in keiner Gruppen-Quellen-Liste enthalten sind
+    // ausblenden — sonst wirken sie wie "0 Treffer" obwohl sie absichtlich
+    // nicht gescrapt werden. Backend liefert eligible=true/false pro Site.
+    if (s.eligible === false) continue;
+    if (s.status === 'skipped') continue;
+    const cls = s.ok === true ? 'ok' : s.ok === false ? 'err' : '';
+    const count = (s.count != null) ? String(s.count) : '–';
+    const row = document.createElement('div');
+    row.className = 'site' + (cls ? ' ' + cls : '');
+    row.title = String(s.detail || s.status || '');
+    const pill = document.createElement('div');
+    pill.className = 'pill';
+    const lbl  = document.createElement('div');
+    lbl.className = 'name';
+    lbl.textContent = name;
+    const cnt = document.createElement('div');
+    cnt.className = 'count';
+    cnt.textContent = count;
+    row.append(pill, lbl, cnt);
+    root.append(row);
+  }
+}
+
+// Iter. 36: Live-Progress-Banner aktualisieren
+function renderLive(scraping, current) {
+  const banner = $('live-banner');
+  if (!banner) return;
+  const c = current || {};
+  if (scraping && (c.site || c.target)) {
+    $('live-kw').textContent   = c.keyword || c.target || '…';
+    $('live-site').textContent = c.site || '…';
+    $('live-grp').textContent  = c.group ? `· Gruppe „${c.group}"` : '';
+    banner.classList.add('on');
+  } else {
+    banner.classList.remove('on');
+  }
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    const data = await res.json();
+    const scraping = !!data.scraping;
+    const last = data.last_scrape;
+    const interval = data.interval_minutes;
+    const sites = data.sites || {};
+
+    if (scraping) {
+      if (!scrapingSince) scrapingSince = Date.now();
+      $('state').textContent = 'Scrape läuft';
+      $('substate').textContent = `läuft seit ${fmtDur(Date.now() - scrapingSince)}`;
+      $('dot').className = 'dot scraping';
+      $('btn-scrape').disabled = true;
+    } else {
+      scrapingSince = null;
+      $('state').textContent = 'Bereit';
+      $('substate').textContent = last ? `fertig ${fmtAgo(last)}` : 'noch kein Scrape';
+      $('dot').className = 'dot idle';
+      $('btn-scrape').disabled = false;
+    }
+    $('last').textContent = fmtAgo(last);
+    $('interval').textContent = interval
+      ? (interval >= 60 ? `${Math.round(interval/60)} h` : `${interval} min`)
+      : 'aus';
+
+    renderLive(scraping, data.current);
+    renderSites(sites);
+  } catch (e) {
+    $('state').textContent = 'Offline';
+    $('substate').textContent = 'Flask nicht erreichbar';
+    $('dot').className = 'dot error';
+  }
+}
+
+$('btn-scrape').addEventListener('click', async () => {
+  $('btn-scrape').disabled = true;
+  try {
+    await fetch('/api/scrape', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  } catch (e) {}
+  setTimeout(refresh, 400);
+});
+$('btn-open').addEventListener('click', async () => {
+  // Iter. 34+: ruft /api/window/show um das pywebview-Hauptfenster nach vorn
+  // zu holen, statt window.open() (das wuerde einen Default-Browser-Tab oeffnen).
+  try {
+    await fetch('/api/window/show', { method: 'POST' });
+  } catch (e) {
+    // Fallback wenn /api/window/show nicht existiert (alte Server-Version):
+    // dann doch window.open — besser als nichts.
+    try { window.open('/', '_blank'); } catch (_) {}
+  }
+});
+
+refresh();
+setInterval(refresh, 2000);
+
+// Iter. 35 Stufe B: Custom Title-Bar Buttons
+(function bindAppTitleBar() {
+  function dispatch(action) {
+    const api = window.pywebview && window.pywebview.api;
+    if (!api) return;
+    if (action === 'min')   api.minimize();
+    else if (action === 'max')   api.toggle_maximize();
+    else if (action === 'close') api.close();
+  }
+  document.querySelectorAll('.app-titlebar-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      dispatch(btn.dataset.titlebarAction);
+    });
+  });
+})();
+</script>
+</body>
+</html>

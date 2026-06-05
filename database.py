@@ -88,6 +88,11 @@ def _create_schema(c):
         PRIMARY KEY (group_name, source)
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS group_settings (
+        group_name TEXT PRIMARY KEY,
+        min_price  REAL
+    )''')
+
     # Geocoding cache: maps a location string ("80331 München", "10115 Berlin")
     # to lat/lon. status='ok' = resolved, status='notfound' = Nominatim returned
     # nothing (negative cache, retry after a week).
@@ -287,6 +292,59 @@ ALL_SOURCES: list[dict] = [
     # Schwer erreichbar (DataDome)
     {'name': 'Kaufland',           'category': 'Großmarkt',   'note': 'oft geblockt'},
     {'name': 'Backmarket',         'category': 'Tech',        'note': 'Refurbished · oft geblockt'},
+    # ── Iter. 36: 48 weitere Shops (matchen scraper.py _new_shops) ───
+    # Tech / Elektronik
+    {'name': 'MediaMarkt',         'category': 'Tech',        'note': ''},
+    {'name': 'Saturn',             'category': 'Tech',        'note': ''},
+    {'name': 'Galaxus',            'category': 'Tech',        'note': ''},
+    {'name': 'Coolblue',           'category': 'Tech',        'note': ''},
+    {'name': 'Computeruniverse',   'category': 'Tech',        'note': ''},
+    {'name': 'Expert',             'category': 'Tech',        'note': ''},
+    {'name': 'Euronics',           'category': 'Tech',        'note': ''},
+    {'name': 'ReBuy',              'category': 'Tech',        'note': 'Refurbished'},
+    {'name': 'Jacob',              'category': 'Tech',        'note': ''},
+    # Uhren & Accessoires
+    {'name': 'Christ',             'category': 'Uhren',       'note': ''},
+    {'name': 'Chrono24',           'category': 'Uhren',       'note': ''},
+    {'name': 'Uhrzeit.org',        'category': 'Uhren',       'note': ''},
+    {'name': 'Uhrinstinkt',        'category': 'Uhren',       'note': ''},
+    {'name': 'Valmano',            'category': 'Uhren',       'note': ''},
+    {'name': 'Brandfield',         'category': 'Uhren',       'note': ''},
+    {'name': 'Watchshop',          'category': 'Uhren',       'note': ''},
+    {'name': 'Chronext',           'category': 'Uhren',       'note': ''},
+    {'name': 'Wardow',             'category': 'Uhren',       'note': 'Taschen+Uhren'},
+    {'name': 'Fashionette',        'category': 'Uhren',       'note': 'Taschen+Uhren'},
+    {'name': 'Kapten-Son',         'category': 'Uhren',       'note': ''},
+    {'name': 'Fossil',             'category': 'Uhren',       'note': ''},
+    {'name': 'Skagen',             'category': 'Uhren',       'note': ''},
+    {'name': 'Liebeskind-Berlin',  'category': 'Uhren',       'note': ''},
+    # Parfum & Beauty
+    {'name': 'Douglas',            'category': 'Beauty',      'note': ''},
+    {'name': 'Flaconi',            'category': 'Beauty',      'note': ''},
+    {'name': 'Notino',             'category': 'Beauty',      'note': ''},
+    {'name': 'Parfumdreams',       'category': 'Beauty',      'note': ''},
+    {'name': 'Sephora',            'category': 'Beauty',      'note': ''},
+    {'name': 'Easycosmetic',       'category': 'Beauty',      'note': ''},
+    {'name': 'Pieper',             'category': 'Beauty',      'note': ''},
+    {'name': 'Lookfantastic',      'category': 'Beauty',      'note': ''},
+    {'name': 'Beautywelt',         'category': 'Beauty',      'note': ''},
+    {'name': 'Ludwigbeck',         'category': 'Beauty',      'note': ''},
+    {'name': 'Basler-Beauty',      'category': 'Beauty',      'note': ''},
+    {'name': 'Hagel-Shop',         'category': 'Beauty',      'note': ''},
+    {'name': 'Shop-Apotheke',      'category': 'Beauty',      'note': ''},
+    {'name': 'DocMorris',          'category': 'Beauty',      'note': ''},
+    # Marktplätze & Trend-Shops
+    {'name': 'Zalando',            'category': 'Fashion',     'note': ''},
+    {'name': 'AboutYou',           'category': 'Fashion',     'note': ''},
+    {'name': 'Asos',               'category': 'Fashion',     'note': ''},
+    {'name': 'Etsy',               'category': 'Marktplatz',  'note': ''},
+    {'name': 'BestSecret',         'category': 'Fashion',     'note': 'Login-walled'},
+    {'name': 'Veepee',             'category': 'Fashion',     'note': 'Login-walled'},
+    {'name': 'Snipes',             'category': 'Fashion',     'note': ''},
+    {'name': 'HHV',                'category': 'Fashion',     'note': ''},
+    {'name': 'Breuninger',         'category': 'Fashion',     'note': ''},
+    {'name': 'Baur',               'category': 'Fashion',     'note': ''},
+    {'name': 'Lidl',               'category': 'Großmarkt',   'note': ''},
 ]
 
 ALL_SOURCE_NAMES: list[str] = [s['name'] for s in ALL_SOURCES]
@@ -317,6 +375,41 @@ def set_group_sources(group_name: str, sources: list[str]) -> None:
         )
     conn.commit()
     conn.close()
+
+
+def get_group_min_price(group_name: str):
+    """Return the configured min_price for a group, or None if not set."""
+    conn = get_connection()
+    row = conn.execute(
+        'SELECT min_price FROM group_settings WHERE group_name = ?',
+        (group_name,),
+    ).fetchone()
+    conn.close()
+    return row['min_price'] if row else None
+
+
+def set_group_min_price(group_name: str, min_price) -> None:
+    """Set (or clear) the group-level min_price floor.
+    Pass None to remove the group's min_price restriction."""
+    conn = get_connection()
+    if min_price is None:
+        conn.execute('DELETE FROM group_settings WHERE group_name = ?', (group_name,))
+    else:
+        conn.execute(
+            'INSERT INTO group_settings (group_name, min_price) VALUES (?, ?)'
+            ' ON CONFLICT(group_name) DO UPDATE SET min_price = excluded.min_price',
+            (group_name, float(min_price)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_all_group_settings() -> dict:
+    """Return a dict of group_name -> { min_price } for all groups with settings."""
+    conn = get_connection()
+    rows = conn.execute('SELECT group_name, min_price FROM group_settings').fetchall()
+    conn.close()
+    return {r['group_name']: {'min_price': r['min_price']} for r in rows}
 
 
 def init_db():
@@ -644,7 +737,11 @@ _VISIBLE_SQL = (
     "    AND bs.seller = deals.seller"
     ") "
     "AND deals.price >= COALESCE("
-    "  (SELECT st.min_price FROM search_targets st WHERE st.name = deals.model), 100"
+    "  (SELECT st.min_price FROM search_targets st WHERE st.name = deals.model),"
+    "  (SELECT gs.min_price FROM group_settings gs"
+    "   JOIN search_targets st2 ON gs.group_name = st2.group_name"
+    "   WHERE st2.name = deals.model LIMIT 1),"
+    "  100"
     ")"
 )
 
@@ -1143,7 +1240,8 @@ def get_top_deal_per_group() -> list[dict]:
             f'''SELECT ROUND(AVG(deals.price)) AS avg_price, COUNT(*) AS total_count
                 FROM deals
                 WHERE deals.model IN ({placeholders}) AND deals.available = 1
-                  AND deals.price <= 5000 AND ({_VISIBLE_SQL})''',
+                  AND deals.price <= 5000 AND ({_VISIBLE_SQL})
+                  AND COALESCE(deals.listing_type, 'fixed') != 'auction' ''',
             models,
         ).fetchone()
         avg_price  = avg_count['avg_price']
@@ -1152,7 +1250,10 @@ def get_top_deal_per_group() -> list[dict]:
             f'''SELECT deals.* FROM deals
                 WHERE deals.model IN ({placeholders}) AND deals.available = 1
                   AND deals.price <= 5000 AND ({_VISIBLE_SQL})
-                ORDER BY deals.price ASC LIMIT 1''',
+                ORDER BY
+                  CASE WHEN COALESCE(deals.listing_type, 'fixed') = 'auction' THEN 1 ELSE 0 END ASC,
+                  deals.price ASC
+                LIMIT 1''',
             models,
         ).fetchone()
         meta = group_meta[group_label]

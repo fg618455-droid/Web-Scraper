@@ -7,7 +7,9 @@ import csv
 import io
 import logging
 import os
+import queue as _queue_mod
 import re
+import subprocess
 import threading
 import time
 from collections import defaultdict
@@ -37,6 +39,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+# Iter. 35: Jinja darf Templates nach Edits sofort neu rendern — sonst
+# erzwingen Template-Aenderungen einen App-Restart (Default bei debug=False).
+# Dev-bequemer, in einer Single-User-Desktop-App vernachlaessigbarer Overhead.
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.auto_reload = True
+
 # init_db() is called in main.py for the desktop-app flow.
 # For standalone runs (python app.py) we initialise here via __name__ guard at bottom.
 
@@ -81,6 +89,124 @@ def favicon():
 @app.route('/api/health')
 def api_health():
     return jsonify({'ok': True, 'ts': datetime.now().isoformat()})
+
+
+# ── Update-Check API (für Web-UI-Banner) ────────────────────────────────────
+
+@app.route('/api/update/check')
+def api_update_check():
+    """Check GitHub Releases for a newer version. Returns update info or null."""
+    try:
+        from updater import check_for_updates, get_current_version
+        current = get_current_version()
+        latest, release = check_for_updates()
+        if latest and release:
+            changelog = (release.get('body') or '').strip()
+            if len(changelog) > 600:
+                changelog = changelog[:600] + '\n…'
+            return jsonify({
+                'update_available': True,
+                'current_version':  current,
+                'latest_version':   latest,
+                'html_url':         release.get('html_url', ''),
+                'changelog':        changelog,
+            })
+        return jsonify({'update_available': False, 'current_version': current})
+    except Exception as e:
+        logger.warning('update check failed: %s', e)
+        return jsonify({'update_available': False, 'error': str(e)})
+
+
+@app.route('/api/update/install', methods=['POST'])
+def api_update_install():
+    """Trigger the in-place update in a background thread.
+    Only works when the app is running as a frozen .exe (sys.frozen=True).
+    """
+    try:
+        from updater import check_for_updates, download_and_update
+        _, release = check_for_updates()
+        if not release:
+            return jsonify({'error': 'Kein Update verfügbar'}), 404
+
+        def _do_update():
+            import time
+            time.sleep(0.5)  # allow HTTP response to reach the client first
+            download_and_update(release)
+
+        threading.Thread(target=_do_update, daemon=True, name='updater').start()
+        return jsonify({'ok': True, 'message': 'Update gestartet — App startet neu'})
+    except Exception as e:
+        logger.exception('update install failed: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+
+# Iter. 34: main.py setzt das auf _show_main_window — wird vom Single-Instance-
+# Pfad genutzt um die laufende App in den Vordergrund zu holen.
+window_show_callback = None
+# Iter. 36: Klick auf Status-Pille soll Scrape-Fenster oeffnen.
+scrape_window_show_callback = None
+
+
+@app.route('/api/window/show', methods=['GET', 'POST'])
+def api_window_show():
+    """Iter. 34: bringt das Haupt-pywebview-Fenster nach vorn. Wird vom
+    Single-Instance-Lock einer zweiten DealScraper-Instanz genutzt.
+    """
+    try:
+        if window_show_callback:
+            window_show_callback()
+        else:
+            # Fallback: webview-API direkt
+            try:
+                import webview
+                if webview.windows:
+                    webview.windows[0].show()
+            except Exception:
+                pass
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/scrape-window/show', methods=['GET', 'POST'])
+def api_scrape_window_show():
+    """Iter. 36: oeffnet das Scrape-Status-Fenster (gleicher Pfad wie der
+    Tray-Eintrag „Scrape-Fenster"). Klick-Handler an der Status-Pille
+    im Hauptfenster."""
+    try:
+        if scrape_window_show_callback:
+            scrape_window_show_callback()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/debug/scraper-state')
+def api_debug_scraper_state():
+    """Iter. 31: Beweis-Endpoint — sagt welcher Akamai-Bypass-Pfad gerade live ist.
+    Hilft beim Verifizieren nach Update / Setup-Wechsel ohne im Code zu graben.
+    """
+    profile = os.environ.get('DEALSCRAPER_PROFILE_PATH', '') or ''
+    try:
+        from ebay_session import has_session as _ebay_has_session
+        have_login = bool(_ebay_has_session())
+    except Exception:
+        have_login = False
+    persist_disabled_until = getattr(scraper, '_PERSIST_DISABLED_UNTIL', 0.0)
+    last_use = getattr(scraper, '_PERSIST_LAST_USE', 0.0)
+    return jsonify({
+        'persistent_available':   scraper._persistent_available(),
+        'cdp_available':          scraper._cdp_available(),
+        'have_login':             have_login,
+        'profile_path':           profile,
+        'profile_path_exists':    bool(profile) and os.path.isdir(profile),
+        'persist_disabled':       bool(getattr(scraper, '_PERSIST_DISABLED', False)),
+        'persist_disabled_until': persist_disabled_until,
+        'last_persistent_use':    last_use,
+        'cdp_port':               os.environ.get('DEALSCRAPER_CDP_PORT', ''),
+        'scraping':               bool(scraper.STATUS.get('scraping')),
+        'last_scrape':            scraper.STATUS.get('last_scrape'),
+    })
 
 # Interval is loaded from DB after init_db() in _init_interval() below.
 scrape_interval_minutes: int = 240
@@ -161,7 +287,9 @@ process_deals = _build_callback()
 
 def _do_scrape(target: dict | None = None,
                targets: list | None = None,
-               label: str | None = None) -> None:
+               label: str | None = None,
+               color: str | None = None,
+               extra: str | None = None) -> None:
     """Run a scrape.
 
     Modes:
@@ -194,13 +322,29 @@ def _do_scrape(target: dict | None = None,
         restrict       = None
         reschedule     = True
     try:
-        scraper.run_scrape(callback=_build_callback(restrict), targets=scrape_targets)
+        deals = scraper.run_scrape(callback=_build_callback(restrict), targets=scrape_targets,
+                                   color=color, extra=extra)
     except Exception as e:
         logger.exception('Scrape failed: %s', e)
         scraper.STATUS['scraping'] = False
+        deals = []
     finally:
         if reschedule:
             _schedule_next()
+            # Iter. 31: Tray-Notification am Ende eines globalen Scrapes.
+            # Nur fuer den globalen Pfad — Per-Target/Per-Group-Clicks waeren
+            # zu spammy weil sie sekuendlich passieren koennen.
+            try:
+                n = len(deals) if deals else 0
+                ok_sites = sum(1 for s in scraper.STATUS.get('sites', {}).values()
+                               if s.get('ok'))
+                total_sites = len(scraper.STATUS.get('sites', {}) or {})
+                send_notification(
+                    'Scrape fertig',
+                    f'{n} Deals · {ok_sites}/{total_sites} Quellen OK',
+                )
+            except Exception:
+                pass
 
 
 def _schedule_next() -> None:
@@ -212,10 +356,55 @@ def _schedule_next() -> None:
     if scrape_interval_minutes <= 0:
         logger.info('Auto-scrape disabled (interval=0)')
         return
-    _timer = threading.Timer(scrape_interval_minutes * 60, _do_scrape)
+    _timer = threading.Timer(scrape_interval_minutes * 60,
+                             lambda: _enqueue_scrape())
     _timer.daemon = True
     _timer.start()
     logger.info(f'Next auto-scrape in {scrape_interval_minutes} min')
+
+
+# Iter. 36: Scrape-Queue fuer sequenzielle Verarbeitung paralleler Klicks.
+# Vorher hat ein zweiter Scrape-Klick (z.B. Gruppe B waehrend Gruppe A laeuft)
+# ein "already_running" zurueckgegeben. Jetzt landet er in der Queue und
+# wird automatisch gestartet sobald der laufende Scrape fertig ist.
+_scrape_queue: _queue_mod.Queue = _queue_mod.Queue()
+_scrape_worker_started = False
+_scrape_worker_lock = threading.Lock()
+
+
+def _scrape_worker() -> None:
+    while True:
+        task = _scrape_queue.get()
+        try:
+            _do_scrape(**task)
+        except Exception as e:
+            logger.exception('Scrape-Queue task failed: %s', e)
+        finally:
+            _scrape_queue.task_done()
+
+
+def _ensure_scrape_worker() -> None:
+    global _scrape_worker_started
+    with _scrape_worker_lock:
+        if _scrape_worker_started:
+            return
+        _scrape_worker_started = True
+        threading.Thread(target=_scrape_worker,
+                         name='scrape-queue-worker', daemon=True).start()
+
+
+def _enqueue_scrape(**kwargs) -> dict:
+    """Stelle einen Scrape-Task in die Queue. Gibt status+queue_position zurueck.
+    status='started' wenn nichts laeuft und Queue leer, sonst 'queued'.
+    """
+    _ensure_scrape_worker()
+    qsize_before = _scrape_queue.qsize()
+    running = bool(scraper.STATUS.get('scraping'))
+    _scrape_queue.put(kwargs)
+    if running or qsize_before > 0:
+        position = qsize_before + (1 if running else 0)
+        return {'status': 'queued', 'queue_position': position}
+    return {'status': 'started', 'queue_position': 0}
 
 
 def _refresh_one_auction(deal: dict) -> bool:
@@ -424,6 +613,14 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/scrape-window')
+def scrape_window():
+    """Iter. 31: Mini-Floating-Fenster fuer Scrape-Status. Wird vom Tray-Menu
+    als kleines Chrome --app=...380x540 geoeffnet. Pollt /api/status alle 2s.
+    """
+    return render_template('scrape_window.html')
+
+
 @app.route('/api/deals/<int:deal_id>')
 def api_deal_by_id(deal_id):
     """Get a single deal by its ID."""
@@ -526,23 +723,23 @@ def api_save_filter_settings():
 
 @app.route('/api/scrape', methods=['POST'])
 def api_scrape():
-    if scraper.STATUS['scraping']:
-        return jsonify({'status': 'already_running'})
-    t = threading.Thread(target=_do_scrape, daemon=True)
-    t.start()
-    return jsonify({'status': 'started'})
+    data = request.get_json(force=True, silent=True) or {}
+    kwargs = {}
+    if data.get('color'):
+        kwargs['color'] = str(data['color']).strip() or None
+    if data.get('extra'):
+        kwargs['extra'] = str(data['extra']).strip() or None
+    return jsonify(_enqueue_scrape(**kwargs))
 
 
 @app.route('/api/scrape/<int:target_id>', methods=['POST'])
 def api_scrape_target(target_id: int):
-    if scraper.STATUS['scraping']:
-        return jsonify({'status': 'already_running'})
     targets = [t for t in db.get_targets() if t['id'] == target_id]
     if not targets:
         return jsonify({'error': 'target not found'}), 404
-    t = threading.Thread(target=_do_scrape, args=(targets[0],), daemon=True)
-    t.start()
-    return jsonify({'status': 'started', 'target': targets[0]['name']})
+    result = _enqueue_scrape(target=targets[0])
+    result['target'] = targets[0]['name']
+    return jsonify(result)
 
 
 @app.route('/api/scrape/group/<path:group_name>', methods=['POST'])
@@ -551,29 +748,60 @@ def api_scrape_group(group_name: str):
 
     Saves the user from clicking "Aktualisieren" on each product card in a
     group separately (Felix: "ich muss immer einzelne produkte aktualisieren").
+    Iter. 36: laeuft schon was, wird die Gruppe enqueued statt abgewiesen.
     """
-    if scraper.STATUS['scraping']:
-        return jsonify({'status': 'already_running'})
     group_targets = [t for t in db.get_targets()
                      if t.get('active') and (t.get('group_name') or '') == group_name]
     if not group_targets:
         return jsonify({'error': f'Keine aktiven Targets in Gruppe „{group_name}"'}), 404
-    th = threading.Thread(
-        target=_do_scrape,
-        kwargs={'targets': group_targets, 'label': f'group: {group_name}'},
-        daemon=True,
-    )
-    th.start()
-    return jsonify({
-        'status':  'started',
-        'group':   group_name,
-        'targets': [t['name'] for t in group_targets],
-    })
+    result = _enqueue_scrape(targets=group_targets, label=f'group: {group_name}')
+    result['group'] = group_name
+    result['targets'] = [t['name'] for t in group_targets]
+    return jsonify(result)
+
+
+def _compute_active_sites() -> set:
+    """Iter. 36: Welche Site-Namen sind in der Vereinigung aller aktiven Target-
+    sources? Sites die in KEINEM aktiven Target zugelassen sind, zeigen wir
+    in der UI gar nicht erst — sonst wirken sie wie '0 Treffer'.
+
+    Targets mit leerer sources-Liste = keine Restriction = alle Sites erlaubt.
+    """
+    try:
+        targets = db.get_targets()
+    except Exception:
+        return set()
+    active = [t for t in targets if t.get('active')]
+    if not active:
+        return set()
+    # Wenn auch nur ein Target unrestricted ist, sind alle Sites aktiv.
+    if any(not t.get('sources') for t in active):
+        return set(scraper.STATUS.get('sites', {}).keys())
+    union = set()
+    for t in active:
+        union.update(t.get('sources') or [])
+    # Apple-UVP wird unconditional fuer alle Targets gescrapt (Referenzpreise)
+    # und ist deshalb nicht Teil der per-Gruppe-Quellen-Filter-Logik.
+    union.add('Apple')
+    return union
 
 
 @app.route('/api/status')
 def api_status():
-    return jsonify({**scraper.STATUS, 'interval_minutes': scrape_interval_minutes})
+    # Iter. 36: jede /api/status-Antwort flaggt pro Site ob sie aktuell in einer
+    # Gruppen-Quellen-Liste enthalten ist. Frontend versteckt Sites mit
+    # eligible=false damit Felix keine "0 Treffer" sieht fuer Quellen die er
+    # bewusst nicht aktiviert hat.
+    active = _compute_active_sites()
+    sites_with_flag = {
+        name: {**info, 'eligible': name in active}
+        for name, info in scraper.STATUS.get('sites', {}).items()
+    }
+    return jsonify({
+        **scraper.STATUS,
+        'sites': sites_with_flag,
+        'interval_minutes': scrape_interval_minutes,
+    })
 
 
 @app.route('/api/stats')
@@ -1161,6 +1389,20 @@ def api_get_sources():
     return jsonify(db.ALL_SOURCES)
 
 
+@app.route('/api/groups/<string:group_name>/min-price', methods=['GET'])
+def api_get_group_min_price(group_name: str):
+    return jsonify({'min_price': db.get_group_min_price(group_name)})
+
+
+@app.route('/api/groups/<string:group_name>/min-price', methods=['PUT'])
+def api_set_group_min_price(group_name: str):
+    data = request.get_json(force=True, silent=True) or {}
+    raw = data.get('min_price')
+    min_price = float(raw) if raw not in (None, '', 0) else None
+    db.set_group_min_price(group_name, min_price)
+    return jsonify({'ok': True, 'group': group_name, 'min_price': min_price})
+
+
 @app.route('/api/groups/<string:group_name>/sources', methods=['GET'])
 def api_get_group_sources(group_name: str):
     """Return the list of allowed sources for a group.
@@ -1181,14 +1423,40 @@ def api_set_group_sources(group_name: str):
     return jsonify({'ok': True, 'group': group_name, 'sources': sources})
 
 
+_CHROME_PATHS = [
+    r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+    r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+]
+_NO_WIN = 0x08000000
+
+
+@app.route('/api/open', methods=['POST'])
+def api_open_url():
+    """Öffnet eine Deal-URL in Chrome als App-Fenster (kein Opera/Standard-Browser)."""
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get('url') or '').strip()
+    if not url.startswith(('http://', 'https://')):
+        return jsonify({'error': 'invalid url'}), 400
+    for path in _CHROME_PATHS:
+        if os.path.exists(path):
+            subprocess.Popen([path, f'--app={url}'], creationflags=_NO_WIN)
+            return jsonify({'ok': True, 'browser': 'chrome'})
+    # Fallback: Edge
+    edge = r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+    if os.path.exists(edge):
+        subprocess.Popen([edge, f'--app={url}'], creationflags=_NO_WIN)
+        return jsonify({'ok': True, 'browser': 'edge'})
+    import webbrowser
+    webbrowser.open(url)
+    return jsonify({'ok': True, 'browser': 'default'})
+
+
 @app.route('/api/dashboard')
 def api_dashboard():
     targets = db.get_targets()
-    # Bulk-fetch sources per group ONCE so we don't call get_group_sources()
-    # per target (would be N+1 round-trips). Frontend reads sources off
-    # each target — without this field the group badge always shows
-    # "alle Quellen" no matter what the user saved.
+    # Bulk-fetch per-group data ONCE to avoid N+1 round-trips.
     group_sources_cache: dict[str, list[str]] = {}
+    group_settings_cache: dict = db.get_all_group_settings()
     result = []
     for t in targets:
         group = t.get('group_name')
@@ -1198,18 +1466,19 @@ def api_dashboard():
             except Exception:
                 group_sources_cache[group] = []
         result.append({
-            'id':           t['id'],
-            'name':         t['name'],
-            'keyword':      t['keyword'],
-            'active':       t['active'],
-            'group_name':   group,
-            'retail_price': t.get('retail_price'),
-            'min_price':    t.get('min_price'),
-            'wish_price':   t.get('wish_price'),
-            'apple_price':  t.get('apple_price'),
-            'sources':      group_sources_cache.get(group, []) if group else [],
-            'stats':        db.get_target_summary(t['name']),
-            'top_deals':    db.get_top_deals(t['name']) if t['active'] else [],
+            'id':             t['id'],
+            'name':           t['name'],
+            'keyword':        t['keyword'],
+            'active':         t['active'],
+            'group_name':     group,
+            'retail_price':   t.get('retail_price'),
+            'min_price':      t.get('min_price'),
+            'wish_price':     t.get('wish_price'),
+            'apple_price':    t.get('apple_price'),
+            'sources':        group_sources_cache.get(group, []) if group else [],
+            'group_min_price': group_settings_cache.get(group, {}).get('min_price') if group else None,
+            'stats':          db.get_target_summary(t['name']),
+            'top_deals':      db.get_top_deals(t['name']) if t['active'] else [],
         })
     return jsonify(result)
 
@@ -1334,8 +1603,41 @@ def _load_persisted_interval():
         scrape_interval_minutes = 240
 
 
-# Background auction-refresh starts as soon as the app module is imported
-# (i.e. from main.py too) — daemon thread dies with the process.
+# ── Lightweight 60-second auction-expiry thread ──────────────────────────────
+# Separate from the heavy auction-refresh loop (30 min): only calls
+# mark_expired_auctions() so the UI shows auctions as ended within ~1 min
+# of their deadline, without hammering eBay with extra requests.
+
+_expire_thread: threading.Thread | None = None
+_expire_stop = threading.Event()
+EXPIRE_CHECK_EVERY_SEC = 60
+
+
+def _expire_auctions_loop() -> None:
+    logger.info('Auction-expiry thread started (every %ds)', EXPIRE_CHECK_EVERY_SEC)
+    while not _expire_stop.wait(EXPIRE_CHECK_EVERY_SEC):
+        try:
+            n = db.mark_expired_auctions()
+            if n:
+                logger.info('Expiry check: %d auctions retired', n)
+        except Exception:
+            logger.exception('Auction-expiry check crashed')
+
+
+def _start_expire_thread() -> None:
+    global _expire_thread
+    if _expire_thread and _expire_thread.is_alive():
+        return
+    _expire_stop.clear()
+    _expire_thread = threading.Thread(
+        target=_expire_auctions_loop, daemon=True, name='auction-expiry'
+    )
+    _expire_thread.start()
+
+
+# Background threads start as soon as the app module is imported
+# (i.e. from main.py too) — daemon threads die with the process.
+_start_expire_thread()
 _start_auction_refresh()
 _start_geocode_thread()
 
