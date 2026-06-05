@@ -305,7 +305,8 @@
     <section class="drawer-section">
       <h3><svg class="h3-icon"><use href="#i-tag-eur"/></svg> eBay-Login</h3>
       <p class="dim text-xs" style="margin: 0 0 8px;">Aktiviert das automatische Importieren der Gebotsübersicht — sonst musst du Gebote manuell einfügen.</p>
-      <div id="ebay-session-status" class="dim text-xs" style="margin-bottom: 8px;">Lade Status…</div>
+      <div id="ebay-session-status" class="dim text-xs" style="margin-bottom: 4px;">Lade Status…</div>
+      <div id="ebay-session-age-warn" class="hidden text-xs" style="color: var(--amber, #fbbf24); margin-bottom: 8px;"></div>
       <div class="alert-form-row" style="gap: 8px;">
         <button id="ebay-login-btn" class="btn btn-primary" style="flex: 1;">
           <svg class="btn-icon-svg"><use href="#i-refresh"/></svg>
@@ -314,6 +315,25 @@
         <button id="ebay-logout-btn" class="btn btn-ghost hidden" title="Gespeicherten Login löschen">
           <svg class="btn-icon-svg"><use href="#i-x"/></svg>
         </button>
+      </div>
+      <button id="ebay-validate-btn" class="btn btn-ghost btn-block hidden" style="margin-top: 6px;">
+        <svg class="btn-icon-svg"><use href="#i-check"/></svg>
+        <span>Session prüfen</span>
+      </button>
+    </section>
+
+    <section class="drawer-section">
+      <h3><svg class="h3-icon"><use href="#i-refresh"/></svg> Wartung</h3>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <button id="backup-btn" class="btn btn-ghost btn-block">
+          <svg class="btn-icon-svg"><use href="#i-download"/></svg>
+          <span>DB-Backup erstellen</span>
+        </button>
+        <button id="cleanup-btn" class="btn btn-ghost btn-block">
+          <svg class="btn-icon-svg"><use href="#i-check"/></svg>
+          <span>Duplikate bereinigen</span>
+        </button>
+        <div id="backup-list" class="dim text-xs" style="margin-top: 2px;"></div>
       </div>
     </section>
 

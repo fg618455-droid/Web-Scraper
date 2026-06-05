@@ -128,24 +128,6 @@ def _find_sha256_asset(release_data: dict, zip_name: str) -> str | None:
     return None
 
 
-def _verify_sha256(zip_path: str, sha_url: str) -> bool:
-    """Download checksum file and verify zip against it. Returns False on mismatch."""
-    try:
-        raw = _urlopen_retry(sha_url)
-        expected = raw.decode().split()[0].strip().lower()
-        h = hashlib.sha256()
-        with open(zip_path, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-        actual = h.hexdigest().lower()
-        if actual == expected:
-            logger.info('SHA256 OK: %s', actual)
-            return True
-        logger.error('SHA256 MISMATCH: expected=%s  actual=%s', expected, actual)
-        return False
-    except Exception as exc:
-        logger.warning('SHA256 verification skipped: %s', exc)
-        return True  # treat missing checksum as non-fatal
 
 
 def _backup_deals_db() -> None:
@@ -203,31 +185,48 @@ def _find_checksum_asset(release_data: dict) -> str | None:
 
 
 def _verify_sha256(zip_path: str, zip_name: str, checksum_url: str) -> bool:
-    """Laedt sha256sums.txt, prueft Prüfsumme des ZIPs.
-    Gibt True zurueck wenn korrekt. Gibt True zurueck wenn kein Eintrag
-    fuer diese Datei gefunden (partial-checksums-Datei, kein Hard-Fail)."""
+    """Laedt Checksum-Datei, prueft SHA256 des ZIPs.
+
+    Unterstuetzt zwei Formate:
+    - Bundle (sha256sums.txt): '<hash>  <filename>' pro Zeile — matcht zip_name
+    - Sidecar (.sha256): einzelner 64-Zeichen Hex-Token (kein Dateiname)
+    Gibt True zurueck bei OK oder wenn keine Prüfsumme gefunden (non-fatal).
+    """
     try:
         req = urllib.request.Request(checksum_url,
                                      headers={"User-Agent": "DealScraper-Updater"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
             content = r.read().decode("utf-8", errors="replace")
         target = zip_name.lower()
+        sidecar_hash = None
         for line in content.splitlines():
             parts = line.split()
+            if len(parts) == 1 and len(parts[0]) == 64:
+                # Sidecar-Format: nur der Hash, kein Dateiname
+                sidecar_hash = parts[0]
+                continue
             if len(parts) < 2:
                 continue
             expected_hash, fname = parts[0], parts[-1].lstrip("*").lower()
             if fname == target or target.endswith(fname):
                 actual = _sha256_file(zip_path)
                 if actual.lower() != expected_hash.lower():
-                    print(f"[Updater] SHA256-Fehler! Erwartet: {expected_hash}  Erhalten: {actual}")
+                    logger.error('SHA256-Fehler! Erwartet: %s  Erhalten: %s', expected_hash, actual)
                     return False
-                print(f"[Updater] SHA256 OK: {actual[:16]}…")
+                logger.info('SHA256 OK: %s', actual[:16])
                 return True
-        print(f"[Updater] Kein SHA256-Eintrag fuer {zip_name} gefunden — ueberspringe Pruefung.")
+        # Fallback: Sidecar (single hash, no filename in file)
+        if sidecar_hash:
+            actual = _sha256_file(zip_path)
+            if actual.lower() != sidecar_hash.lower():
+                logger.error('SHA256-Fehler (sidecar)! Erwartet: %s  Erhalten: %s', sidecar_hash, actual)
+                return False
+            logger.info('SHA256 OK (sidecar): %s', actual[:16])
+            return True
+        logger.warning('Kein SHA256-Eintrag fuer %s gefunden — ueberspringe Pruefung.', zip_name)
         return True
     except Exception as e:
-        print(f"[Updater] SHA256-Pruefung fehlgeschlagen: {e} — ueberspringe.")
+        logger.warning('SHA256-Pruefung fehlgeschlagen: %s — ueberspringe.', e)
         return True
 
 
@@ -337,30 +336,24 @@ def download_and_update(release_data, latest_version=None):
         logger.info('Downloading %s ...', zip_url)
         _download_with_progress(zip_url, zip_path)
 
-        # SHA256 verification
-        sha_url = _find_sha256_asset(release_data, zip_name)
+        # SHA256-Verifikation: sidecar (.sha256) hat Vorrang, Fallback auf sha256sums.txt
+        _zname = zip_name or "update.zip"
+        sha_url = _find_sha256_asset(release_data, _zname)
+        checksum_url = _find_checksum_asset(release_data)
         if sha_url:
-            if not _verify_sha256(zip_path, sha_url):
+            if not _verify_sha256(zip_path, _zname, sha_url):
+                raise ValueError("SHA256 checksum mismatch — aborting update")
+        elif checksum_url:
+            if not _verify_sha256(zip_path, _zname, checksum_url):
                 raise ValueError("SHA256 checksum mismatch — aborting update")
         else:
-            logger.warning('No .sha256 asset in release — skipping checksum verification')
+            logger.warning('No SHA256 asset in release — skipping checksum verification')
 
         extract_dir = os.path.join(tmp_root, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
         logger.info('Extracting zip ...')
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
-
-        # SHA256-Verifikation vor dem Entpacken
-        checksum_url = _find_checksum_asset(release_data)
-        if checksum_url:
-            if not _verify_sha256(zip_path, zip_name or "update.zip", checksum_url):
-                print("[Updater] SHA256-Prüfung fehlgeschlagen — Update abgebrochen.")
-                if html_url:
-                    webbrowser.open(html_url)
-                return False
-        else:
-            print("[Updater] Keine Checksums-Datei im Release — SHA256-Pruefung uebersprungen.")
 
         new_root = _extracted_root(extract_dir)
 

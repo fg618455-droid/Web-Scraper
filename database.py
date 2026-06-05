@@ -1416,7 +1416,8 @@ def cleanup_duplicates() -> dict:
     conn = get_connection()
     c = conn.cursor()
 
-    retired = 0
+    retired_by_id  = 0
+    retired_by_url = 0
 
     # Strategie 1: eBay-Duplikate via Item-ID
     ebay_rows = c.execute(
@@ -1436,16 +1437,14 @@ def cleanup_duplicates() -> dict:
     for eid, rows in item_id_map.items():
         if len(rows) <= 1:
             continue
-        # Behalte den mit mehr Daten (bid_count > 0 bevorzugt, dann neuester)
         rows_sorted = sorted(
             rows,
             key=lambda r: (r['bid_count'] or 0, r['last_seen'] or ''),
             reverse=True,
         )
-        keep_id = rows_sorted[0]['id']
         for r in rows_sorted[1:]:
             c.execute('UPDATE deals SET available = 0 WHERE id = ?', (r['id'],))
-            retired += 1
+            retired_by_id += 1
 
     # Strategie 2: URL-Normalisierung (Tracking-Params entfernen)
     _TRACKING_RE = _re.compile(
@@ -1468,15 +1467,16 @@ def cleanup_duplicates() -> dict:
     for row in all_rows:
         norm = _normalize_url(row['url'])
         if norm in seen_norm:
-            # Aeltere Zeile wird behalten (found_at ASC), neuere retired
             c.execute('UPDATE deals SET available = 0 WHERE id = ?', (row['id'],))
-            retired += 1
+            retired_by_url += 1
         else:
             seen_norm[norm] = row['id']
 
     conn.commit()
     conn.close()
-    return {'retired': retired}
+    return {'retired': retired_by_id + retired_by_url,
+            'retired_by_id': retired_by_id,
+            'retired_by_url': retired_by_url}
 
 
 def delete_target(target_id: int):

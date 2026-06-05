@@ -105,9 +105,11 @@ async function loadEbaySessionStatus() {
 }
 
 function renderEbaySessionStatus(s) {
-  const statusEl = document.getElementById('ebay-session-status');
-  const loginBtn = document.getElementById('ebay-login-btn');
+  const statusEl  = document.getElementById('ebay-session-status');
+  const ageWarn   = document.getElementById('ebay-session-age-warn');
+  const loginBtn  = document.getElementById('ebay-login-btn');
   const logoutBtn = document.getElementById('ebay-logout-btn');
+  const valBtn    = document.getElementById('ebay-validate-btn');
   if (!statusEl || !loginBtn) return;
 
   if (s.in_progress) {
@@ -116,18 +118,33 @@ function renderEbaySessionStatus(s) {
     loginBtn.disabled = true;
     loginBtn.querySelector('span').textContent = 'Login läuft…';
     logoutBtn?.classList.add('hidden');
+    valBtn?.classList.add('hidden');
+    if (ageWarn) ageWarn.classList.add('hidden');
   } else if (s.has_session) {
-    statusEl.textContent = '✅ Eingeloggt — Gebot-Auto-Import aktiv';
+    const days = s.session_age_days != null ? Math.round(s.session_age_days) : null;
+    const ageLabel = days != null ? ` (vor ${days} Tag${days === 1 ? '' : 'en'})` : '';
+    statusEl.textContent = '✅ Eingeloggt — Gebot-Auto-Import aktiv' + ageLabel;
     statusEl.style.color = 'var(--green, #4ade80)';
     loginBtn.disabled = false;
     loginBtn.querySelector('span').textContent = 'Neu einloggen';
     logoutBtn?.classList.remove('hidden');
+    valBtn?.classList.remove('hidden');
+    if (ageWarn) {
+      if (s.session_likely_expired) {
+        ageWarn.textContent = '⚠️ Session könnte abgelaufen sein (> 21 Tage) — bitte erneut einloggen oder prüfen.';
+        ageWarn.classList.remove('hidden');
+      } else {
+        ageWarn.classList.add('hidden');
+      }
+    }
   } else {
     statusEl.textContent = 'Nicht eingeloggt — Gebote müssen manuell eingefügt werden';
     statusEl.style.color = '';
     loginBtn.disabled = false;
     loginBtn.querySelector('span').textContent = 'Bei eBay einloggen';
     logoutBtn?.classList.add('hidden');
+    valBtn?.classList.add('hidden');
+    if (ageWarn) ageWarn.classList.add('hidden');
   }
 }
 
@@ -163,6 +180,76 @@ async function logoutEbay() {
     loadEbaySessionStatus();
   } catch {
     toast('Fehler beim Löschen', 'error');
+  }
+}
+
+async function validateEbaySession() {
+  const btn = document.getElementById('ebay-validate-btn');
+  if (btn) { btn.disabled = true; btn.querySelector('span').textContent = 'Prüfe…'; }
+  try {
+    const res = await api('/api/ebay-session/validate', { method: 'POST' });
+    if (res.valid) toast('✅ ' + (res.message || 'Session gültig'), 'success');
+    else           toast('⚠️ ' + (res.message || 'Session abgelaufen'), 'warning', 6000);
+    loadEbaySessionStatus();
+  } catch {
+    toast('Validierung fehlgeschlagen', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.querySelector('span').textContent = 'Session prüfen'; }
+  }
+}
+
+async function createBackup() {
+  const btn = document.getElementById('backup-btn');
+  if (btn) { btn.disabled = true; btn.querySelector('span').textContent = 'Erstelle…'; }
+  try {
+    const res = await api('/api/backup', { method: 'POST' });
+    const fname = res.path ? res.path.split(/[\\/]/).pop() : '';
+    toast(`✅ Backup erstellt: ${fname}`, 'success', 5000);
+    loadBackupList();
+  } catch {
+    toast('Backup fehlgeschlagen', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.querySelector('span').textContent = 'DB-Backup erstellen'; }
+  }
+}
+
+async function loadBackupList() {
+  const el = document.getElementById('backup-list');
+  if (!el) return;
+  try {
+    const list = await api('/api/backup');
+    if (!list.length) { el.textContent = 'Keine Backups vorhanden.'; return; }
+    el.textContent = '';
+    list.slice(0, 5).forEach(b => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;padding:2px 0;';
+      const name = document.createElement('span');
+      name.textContent = b.filename;
+      const size = document.createElement('span');
+      size.textContent = `${((b.size_kb || 0) / 1024).toFixed(1)} MB`;
+      row.appendChild(name);
+      row.appendChild(size);
+      el.appendChild(row);
+    });
+  } catch { el.textContent = ''; }
+}
+
+async function cleanupDuplicates() {
+  const btn = document.getElementById('cleanup-btn');
+  if (btn) { btn.disabled = true; btn.querySelector('span').textContent = 'Bereinige…'; }
+  try {
+    const res = await api('/api/cleanup-duplicates', { method: 'POST' });
+    const total = (res.retired_by_id || 0) + (res.retired_by_url || 0);
+    if (total > 0) {
+      toast(`✅ ${total} Duplikate bereinigt (${res.retired_by_id || 0} via eBay-ID, ${res.retired_by_url || 0} via URL)`, 'success', 6000);
+      loadDashboard();
+    } else {
+      toast('Keine Duplikate gefunden', 'info');
+    }
+  } catch {
+    toast('Bereinigung fehlgeschlagen', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.querySelector('span').textContent = 'Duplikate bereinigen'; }
   }
 }
 
@@ -2625,10 +2712,16 @@ document.addEventListener('DOMContentLoaded', () => {
     scheduleTitleFilter();
   });
 
-  // eBay-Login-Session (Iter. 25)
+  // eBay-Login-Session
   loadEbaySessionStatus();
   document.getElementById('ebay-login-btn')?.addEventListener('click', startEbayLogin);
   document.getElementById('ebay-logout-btn')?.addEventListener('click', logoutEbay);
+  document.getElementById('ebay-validate-btn')?.addEventListener('click', validateEbaySession);
+
+  // Wartung: Backup + Cleanup
+  document.getElementById('backup-btn')?.addEventListener('click', createBackup);
+  document.getElementById('cleanup-btn')?.addEventListener('click', cleanupDuplicates);
+  loadBackupList();
 
   // Deal-Links in Chrome --app oeffnen statt Standard-Browser (Opera)
   document.addEventListener('click', e => {

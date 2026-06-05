@@ -64,26 +64,38 @@ jobs:
       - name: Build .exe with PyInstaller (uses DealScraper.spec)
         run: pyinstaller --noconfirm --clean DealScraper.spec
 
-      - name: Package dist/DealScraper into ZIP
+      - name: Package dist/DealScraper into ZIP + SHA256
         shell: pwsh
         run: |
           $zipName = "DealScraper-${{ steps.version.outputs.tag }}-windows-x64.zip"
           Compress-Archive -Path dist\DealScraper\* -DestinationPath $zipName
           $size = (Get-Item $zipName).Length / 1MB
           Write-Output "ZIP-Groesse: $([math]::Round($size, 1)) MB"
+          # Sidecar .sha256 Datei (Format: "<hash>  <filename>")
+          $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zipName" | Out-File -FilePath "$zipName.sha256" -Encoding ascii
+          Write-Output "SHA256: $hash"
+          # sha256sums.txt (bundle-Format fuer Abwaertskompatibilitaet)
+          "$hash  $zipName" | Out-File -FilePath "sha256sums.txt" -Encoding ascii
 
       - name: Upload .zip als workflow artifact (manueller Run)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: DealScraper-${{ steps.version.outputs.tag }}-windows-x64
-          path: DealScraper-*-windows-x64.zip
+          path: |
+            DealScraper-*-windows-x64.zip
+            DealScraper-*-windows-x64.zip.sha256
+            sha256sums.txt
           retention-days: 30
 
-      - name: Attach .zip an GitHub Release (nur bei Tag-Push)
+      - name: Attach .zip + SHA256 an GitHub Release (nur bei Tag-Push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: DealScraper-*-windows-x64.zip
+          files: |
+            DealScraper-*-windows-x64.zip
+            DealScraper-*-windows-x64.zip.sha256
+            sha256sums.txt
           generate_release_notes: true
           fail_on_unmatched_files: true
