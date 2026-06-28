@@ -75,6 +75,8 @@ STATUS = {
         for name in _SITE_NAMES
     },
 }
+# Lock für thread-sicheres Schreiben in STATUS (wird von mehreren Threads mutiert)
+_STATUS_LOCK = threading.Lock()
 
 
 def _set_current(site=None, target=None, keyword=None, group=None) -> None:

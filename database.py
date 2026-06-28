@@ -1,5 +1,6 @@
 import sqlite3
 import os
+from contextlib import contextmanager
 from datetime import datetime
 
 from paths import resolve_user_file
@@ -15,6 +16,20 @@ def get_connection():
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA busy_timeout = 60000')
     return conn
+
+
+@contextmanager
+def get_db():
+    """Context-Manager für DB-Verbindungen: commit on success, rollback on error, immer close."""
+    conn = get_connection()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _create_schema(c):

@@ -432,11 +432,9 @@ def _refresh_one_auction(deal: dict) -> bool:
     # OutOfStock. Retire the deal so the UI stops showing it as live.
     if fresh.get('ended'):
         try:
-            conn = db.get_connection()
-            conn.execute('UPDATE deals SET available=0, last_seen=? WHERE id=?',
-                         (datetime.now().isoformat(), deal['id']))
-            conn.commit()
-            conn.close()
+            with db.get_db() as conn:
+                conn.execute('UPDATE deals SET available=0, last_seen=? WHERE id=?',
+                             (datetime.now().isoformat(), deal['id']))
             logger.info(f'auction {deal["id"]} marked ended (eBay page says closed)')
         except Exception as e:
             logger.warning('failed to mark ended auction %s: %s', deal.get('id'), e)
