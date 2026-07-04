@@ -57,3 +57,11 @@ ebay_session.json
 # Build-Spec — alle ausser DealScraper.spec (vom CI gebraucht)
 *.spec
 !DealScraper.spec
+
+# Personal context files
+Claude.md
+Felix Profil.md
+*.zip
+*.zip.sha256
+*_STATUS.md
+*_HISTORY_*.md
